@@ -44,6 +44,8 @@ Use `importance: 0..3` in front matter:
 
 Higher importance increases retrieval weight.
 
+**Auto-tagging for spaced repetition**: When you set `importance: 2` or `3`, also add `spaced-rep: 3` to the tags (unless already present). High-importance items should be tested via spaced repetition.
+
 ## Diary
 In `diary`, write a clear markdown summary of what you did and why (high-level, no fluff).
 

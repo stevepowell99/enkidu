@@ -1871,6 +1871,7 @@ async function cmdDream(args = {}) {
     const rel = String(e?.path || "").replaceAll("\\", "/");
     if (!rel) continue;
     if (!rel.toLowerCase().endsWith(".md")) continue;
+    if (rel.toLowerCase().startsWith("memories/sources/verbatim/")) continue;
     catalog.push({
       path: rel,
       title: e.title || "",
@@ -2062,6 +2063,7 @@ async function dreamPlanOnly({ model, customInstruction }) {
     const rel = String(e?.path || "").replaceAll("\\", "/");
     if (!rel) continue;
     if (!rel.toLowerCase().endsWith(".md")) continue;
+    if (rel.toLowerCase().startsWith("memories/sources/verbatim/")) continue;
     catalog.push({
       path: rel,
       title: e.title || "",
@@ -3129,10 +3131,12 @@ export async function apiHandleRequest({ method, pathname, searchParams, headers
     const idx = await loadIndex();
     const entries = idx.entries || [];
     
-    // Find memories tagged with "spaced-rep" (value 1-3 = relevance weight).
+    // Find memories: either tagged with "spaced-rep: 1-3" OR high importance (2-3).
     const srCandidates = [];
     for (const e of entries) {
       if (String(e.kind || "") !== "memory") continue;
+      
+      // Check explicit spaced-rep tag.
       const tags = Array.isArray(e.tags) ? e.tags : [];
       let srWeight = 0;
       for (const t of tags) {
@@ -3142,6 +3146,13 @@ export async function apiHandleRequest({ method, pathname, searchParams, headers
           break;
         }
       }
+      
+      // Auto-include high-importance items (treat as spaced-rep: 3).
+      const importance = Number(e.importance) || 0;
+      if (srWeight === 0 && importance >= 2) {
+        srWeight = 3;
+      }
+      
       if (srWeight === 0) continue;
       
       // Get current priority (defaults to 3 = medium if not set).
@@ -3473,4 +3484,5 @@ const isDirectRun = import.meta.url === pathToFileURL(process.argv[1] || "").hre
 if (isDirectRun) {
   await main();
 }
+
 

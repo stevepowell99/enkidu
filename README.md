@@ -156,18 +156,20 @@ This lets you give quick instructions to Dream from the chat without clicking th
 
 Hardcoded system for testing yourself on memory notes:
 
-1. **Tag memories** you want to test with `spaced-rep: 1-3` (1=low, 3=high relevance for testing).
-2. **Type `m `** (m + space) in the Work chat to get a random weighted question.
-3. **Rate your answer** 1-5 using the buttons (1=wrong, 5=perfect).
-4. **Priority adjusts automatically**:
+1. **High-importance memories** (`importance: 2-3`) are **automatically included** for testing (no manual tagging needed).
+2. **Optional**: manually tag other memories with `spaced-rep: 1-3` (1=low, 3=high relevance).
+3. **Type `m `** (m + space) in the Work chat to get a random weighted question.
+4. **Rate your answer** 1-5 using the buttons (1=wrong, 5=perfect).
+5. **Priority adjusts automatically**:
    - 1-2 (wrong) → priority +1 (ask more often)
    - 3 (ok) → priority unchanged
    - 4-5 (good) → priority -1 (ask less often)
 
 Front matter example:
 ```yaml
+importance: 3
 tags: concepts, spaced-rep: 3
 spaced-rep-priority: 3
 ```
 
-The system picks questions with weighted randomness: high-priority items are tested more frequently.
+The system picks questions with weighted randomness: high-priority items are tested more frequently. Dream will auto-tag high-importance notes with `spaced-rep: 3` going forward.
