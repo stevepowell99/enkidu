@@ -146,6 +146,14 @@ function parseFrontMatter(text) {
   return out;
 }
 
+function stripFrontMatter(text) {
+  const s = String(text || "");
+  if (!s.startsWith("---")) return s;
+  const parts = s.split(/---/);
+  if (parts.length >= 3) return parts.slice(2).join("---");
+  return s;
+}
+
 async function iterMemoryMarkdownFiles() {
   // Walk memories/ recursively and return *.md (excluding diary index file).
   const out = [];
@@ -293,6 +301,22 @@ async function writeAutoCaptureToInbox(capture) {
   const tagsRaw = capture?.tags;
 
   if (!title || !text) return null;
+
+  // De-dup: if an identical capture already exists in inbox, don't write it again.
+  try {
+    const inboxDir = path.join(MEMORIES_DIR, "inbox");
+    const existing = await fsp.readdir(inboxDir);
+    for (const name of existing) {
+      if (!name.toLowerCase().endsWith(".md")) continue;
+      const p = path.join(inboxDir, name);
+      const md = await readFileUtf8(p);
+      const fm = parseFrontMatter(md);
+      const body = stripFrontMatter(md).trim();
+      if (String(fm.title || "").trim() === title && body === text) return null;
+    }
+  } catch {
+    // If inbox can't be read for any reason, just proceed.
+  }
 
   let tags = [];
   if (Array.isArray(tagsRaw)) {

@@ -36,6 +36,8 @@ Where `<json-or-null>` is either:
 
 Rules:
 - Keep it on ONE line.
+- Only capture something NEW learned in this turn from the current user prompt/your answer.
+- Do NOT capture content that came from earlier chat history or from the “Relevant memories” block.
 - Keep `text` short and factual (what to remember).
 - Only capture information that seems stable/useful later (preferences, facts, decisions).
 
