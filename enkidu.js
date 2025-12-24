@@ -644,7 +644,16 @@ async function openaiEmbed(text, opts = {}) {
   const model = String(opts.model || "").trim() || process.env.OPENAI_EMBEDDING_MODEL || DEFAULT_EMBEDDING_MODEL;
 
   const url = `${baseUrl}/embeddings`;
-  const payload = { model, input: String(text || "") };
+  // Always enforce token-budget trimming here (defensive), even if callers forget.
+  let inputText = trimForEmbedding(String(text || ""));
+  let payload = { model, input: inputText };
+
+  function isTooLongEmbedError(status, raw) {
+    const s = Number(status) || 0;
+    if (s !== 400) return false;
+    const t = String(raw || "").toLowerCase();
+    return t.includes("maximum context length") || t.includes("context length") || t.includes("reduce your prompt");
+  }
 
   const maxRetries = Math.max(0, Math.min(8, Number(process.env.ENKIDU_OPENAI_RETRIES ?? 4) || 4));
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -657,6 +666,15 @@ async function openaiEmbed(text, opts = {}) {
 
       const raw = await resp.text();
       if (!resp.ok) {
+        // If we still somehow exceeded token limits, shrink and retry.
+        if (attempt < maxRetries && isTooLongEmbedError(resp.status, raw)) {
+          // Reduce by ~30% and retry.
+          const maxT = Math.max(512, Math.floor(Number(process.env.ENKIDU_EMBED_MAX_TOKENS || 7800) * Math.pow(0.7, attempt + 1)));
+          inputText = trimToApproxTokens(inputText, maxT);
+          payload = { model, input: inputText };
+          await sleepMs(backoffMs(attempt));
+          continue;
+        }
         const msg = formatOpenAiHttpError(resp.status, raw);
         if (attempt < maxRetries && isRetryableHttpStatus(resp.status)) {
           await sleepMs(backoffMs(attempt));
