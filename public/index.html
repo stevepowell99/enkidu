@@ -131,6 +131,17 @@
                 <button id="workBtnNow" class="btn btn-outline-primary">RunNow</button>
                 <button id="clearHistoryBtn" class="btn btn-outline-secondary">Start over</button>
               </div>
+              <div id="spacedRepPanel" class="mt-2 p-2 border rounded bg-light" style="display:none;">
+                <div class="small text-muted mb-1">Spaced repetition: rate your answer (1=wrong, 5=perfect)</div>
+                <div class="d-flex gap-2">
+                  <button class="btn btn-sm btn-outline-danger" data-sr-answer="1">1</button>
+                  <button class="btn btn-sm btn-outline-warning" data-sr-answer="2">2</button>
+                  <button class="btn btn-sm btn-outline-secondary" data-sr-answer="3">3</button>
+                  <button class="btn btn-sm btn-outline-primary" data-sr-answer="4">4</button>
+                  <button class="btn btn-sm btn-outline-success" data-sr-answer="5">5</button>
+                  <button id="srSkipBtn" class="btn btn-sm btn-outline-secondary ms-auto">Skip</button>
+                </div>
+              </div>
               <div id="workStatus" class="mt-2 small text-muted"></div>
               <div id="autoCaptureStatus" class="small text-muted"></div>
               <details class="mt-2">
@@ -742,8 +753,16 @@
       });
 
       async function doWork(runNow) {
-        // Route "d ..." directly to Dream instead of Work.
         const promptText = String(workPrompt.value || '').trim();
+        
+        // Route "m ..." to spaced repetition instead of Work.
+        if (promptText.startsWith('m ')) {
+          workPrompt.value = '';
+          await doSpacedRep();
+          return;
+        }
+
+        // Route "d ..." directly to Dream instead of Work.
         if (promptText.startsWith('d ')) {
           const dreamInstruction = promptText.slice(2).trim();
           if (!dreamInstruction) {
@@ -757,7 +776,6 @@
           renderHistory();
           workPrompt.value = '';
           // Run Dream with the instruction passed as a custom directive.
-          // (For now we'll just trigger normal Dream; server-side we'd need to inject this as extra context.)
           await doDream(getSelectedModel(), dreamInstruction);
           return;
         }
@@ -855,6 +873,98 @@
         autoCaptureStatusEl.textContent = '';
         usedMemoriesEl.textContent = '';
         usedSourcesEl.textContent = '';
+      };
+
+      // Spaced repetition
+      const spacedRepPanelEl = document.getElementById('spacedRepPanel');
+      const srSkipBtn = document.getElementById('srSkipBtn');
+      let currentSrQuestion = null;
+
+      async function doSpacedRep() {
+        workBtn.disabled = true;
+        workBtnNow.disabled = true;
+        workStatus.textContent = 'Loading spaced repetition question...';
+        
+        try {
+          const resp = await postJson('/api/spaced-rep/next', { model: getSelectedModel() });
+          if (resp && resp.error) {
+            workStatus.textContent = 'Error: ' + resp.error;
+            const h = loadHistory();
+            h.push({ role: 'assistant', content: 'Spaced repetition: ' + resp.error });
+            saveHistory(h.slice(-20));
+            renderHistory();
+            return;
+          }
+          
+          if (!resp || !resp.question) {
+            workStatus.textContent = 'No spaced repetition items available.';
+            const h = loadHistory();
+            h.push({ role: 'assistant', content: 'No spaced repetition items found. Tag memories with "spaced-rep: 1-3" to add them.' });
+            saveHistory(h.slice(-20));
+            renderHistory();
+            return;
+          }
+
+          currentSrQuestion = resp;
+          
+          const h = loadHistory();
+          h.push({ role: 'assistant', content: '[Spaced Rep]\n\n' + resp.question });
+          saveHistory(h.slice(-20));
+          renderHistory();
+          
+          spacedRepPanelEl.style.display = '';
+          workStatus.textContent = 'Rate your answer (1=wrong, 5=perfect)';
+        } finally {
+          workBtn.disabled = false;
+          workBtnNow.disabled = false;
+        }
+      }
+
+      async function submitSrAnswer(rating) {
+        if (!currentSrQuestion) return;
+        
+        spacedRepPanelEl.style.display = 'none';
+        workBtn.disabled = true;
+        workBtnNow.disabled = true;
+        workStatus.textContent = 'Recording answer...';
+        
+        try {
+          const resp = await postJson('/api/spaced-rep/submit', {
+            memoryId: currentSrQuestion.memoryId,
+            rating: Number(rating) || 1,
+          });
+          
+          if (resp && resp.error) {
+            workStatus.textContent = 'Error: ' + resp.error;
+            return;
+          }
+          
+          const feedback = resp && resp.newPriority !== undefined
+            ? `Recorded: ${rating}/5. Priority: ${resp.oldPriority || 0} → ${resp.newPriority}.`
+            : `Recorded: ${rating}/5.`;
+          
+          workStatus.textContent = feedback;
+          const h = loadHistory();
+          h.push({ role: 'user', content: `[SR Answer: ${rating}/5]` });
+          h.push({ role: 'assistant', content: feedback });
+          saveHistory(h.slice(-20));
+          renderHistory();
+          
+          currentSrQuestion = null;
+        } finally {
+          workBtn.disabled = false;
+          workBtnNow.disabled = false;
+        }
+      }
+
+      document.querySelectorAll('[data-sr-answer]').forEach(btn => {
+        btn.onclick = () => submitSrAnswer(btn.getAttribute('data-sr-answer'));
+      });
+
+      srSkipBtn.onclick = () => {
+        spacedRepPanelEl.style.display = 'none';
+        currentSrQuestion = null;
+        workStatus.textContent = 'Skipped.';
       };
 
       const dreamBtn = document.getElementById('dreamBtn');
