@@ -15,7 +15,16 @@ Goal: improve the organisation and quality of the memories folder over time.
 - Merge notes (write a new note that replaces older ones).
 - Delete redundant notes.
 - Rewrite note content to be clearer and more concise.
-- Add/clean front matter (title/created/tags/source).
+- Add/clean front matter (title/created/tags/source/importance).
+
+### Importance
+Use `importance: 0..3` in front matter:
+- 0 = low
+- 1 = normal (default)
+- 2 = important
+- 3 = critical / often-reused
+
+Higher importance increases retrieval weight.
 
 ## Diary
 In `diary`, write a clear markdown summary of what you did and why (high-level, no fluff).

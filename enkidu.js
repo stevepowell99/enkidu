@@ -35,6 +35,8 @@ const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
 const DEFAULT_OPENAI_MODEL = "gpt-4o-mini";
 const DEFAULT_PORT = 3000;
 const DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small";
+const IMPORTANCE_WEIGHT_EMBED = 0.1; // adds up to +0.3 for importance=3
+const IMPORTANCE_WEIGHT_KEYWORD = 2; // adds up to +6 for importance=3
 
 const MEMORY_FOLDERS = [
   path.join(MEMORIES_DIR, "inbox"),
@@ -261,6 +263,9 @@ async function buildIndex() {
       .map((t) => t.trim())
       .filter(Boolean);
 
+    const importanceRaw = fm.importance || "";
+    const importance = Number.isFinite(Number(importanceRaw)) ? Number(importanceRaw) : 0;
+
     let body = text;
     if (body.startsWith("---")) {
       const parts = body.split(/---/);
@@ -272,6 +277,7 @@ async function buildIndex() {
       path: safeRelPath(p),
       title,
       tags,
+      importance,
       created,
       updated,
       preview,
@@ -394,7 +400,8 @@ async function retrieveTopMemoriesByEmbeddings(queries, topN) {
     if (!item || !Array.isArray(item.vector)) continue;
     let best = -1;
     for (const qv of qVecs) best = Math.max(best, cosineSim(qv, item.vector));
-    scored.push([best, e]);
+    const imp = Number.isFinite(Number(e.importance)) ? Number(e.importance) : 0;
+    scored.push([best + imp * IMPORTANCE_WEIGHT_EMBED, e]);
   }
   scored.sort((a, b) => b[0] - a[0]);
 
@@ -478,6 +485,8 @@ async function retrieveTopMemories(prompt, topN) {
     let score = 0;
     score += 3 * intersectionSize(tokenize(title), promptTokens);
     score += 1 * intersectionSize(tokenize(text), promptTokens);
+    const imp = Number.isFinite(Number(e.importance)) ? Number(e.importance) : 0;
+    score += imp * IMPORTANCE_WEIGHT_KEYWORD;
     if (score > 0) scored.push([score, e, text]);
   }
 
@@ -574,6 +583,7 @@ async function writeAutoCaptureToInbox(capture) {
     `title: ${title}`,
     `created: ${created}`,
     `tags: ${tags.join(", ")}`,
+    "importance: 1",
     "source: auto_capture",
     "---",
     "",
@@ -672,6 +682,7 @@ async function workCore({ prompt, model, history, sources }) {
     title: entry.title || "",
     path: entry.path || "",
     tags: entry.tags || [],
+    importance: Number.isFinite(Number(entry.importance)) ? Number(entry.importance) : 0,
   }));
 
   const messages = [
@@ -807,6 +818,7 @@ async function cmdCapture(args) {
     `title: ${title}`,
     `created: ${created}`,
     `tags: ${tags.join(", ")}`,
+    "importance: 1",
     "source: capture",
     "---",
     "",
@@ -1627,7 +1639,7 @@ function renderHtml() {
             usedMemoriesEl.textContent = '(none)';
           } else {
             usedMemoriesEl.innerHTML = ms
-              .map(m => '<div><code>' + escapeHtml(m.path || '') + '</code> — ' + escapeHtml(m.title || '') + '</div>')
+              .map(m => '<div><code>' + escapeHtml(m.path || '') + '</code> — ' + escapeHtml(m.title || '') + ' <span class=\"text-muted\">(imp ' + escapeHtml(String(m.importance ?? 0)) + ')</span></div>')
               .join('');
           }
         }
