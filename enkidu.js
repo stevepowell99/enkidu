@@ -393,7 +393,7 @@ function normaliseHistory(history) {
   return out.slice(-20);
 }
 
-async function workCore({ prompt, model, history }) {
+async function workCore({ prompt, model, history, sources }) {
   const instruction = await readInstruction(WORK_INSTRUCTION_FILE);
   const top = await retrieveTopMemories(prompt, 5);
 
@@ -409,6 +409,20 @@ async function workCore({ prompt, model, history }) {
 
   const userParts = [];
   if (memChunks.length) userParts.push("Relevant memories (may be incomplete):\n\n" + memChunks.join("\n\n"));
+
+  // Optional read-only source excerpts (provided by UI; not stored server-side).
+  if (Array.isArray(sources) && sources.length) {
+    const srcChunks = sources
+      .slice(0, 5)
+      .map((s) => {
+        const p = String(s?.path || "");
+        const c = String(s?.content || "").trim();
+        return [`[Source] ${p}`, "---", c].join("\n");
+      })
+      .join("\n\n");
+    userParts.push("Relevant sources (verbatim, read-only):\n\n" + srcChunks);
+  }
+
   userParts.push("User prompt:\n\n" + prompt);
 
   const usedMemories = top.map(({ entry }) => ({
@@ -805,8 +819,9 @@ async function cmdServe(args) {
         const prompt = String(data.prompt || "").trim();
         const model = String(data.model || "").trim();
         const history = data.history;
+        const sources = data.sources;
         if (!prompt) return sendJson(res, 400, { error: "Missing prompt" });
-        const { raw, usedMemories } = await workCore({ prompt, model, history });
+        const { raw, usedMemories } = await workCore({ prompt, model, history, sources });
         const { answer, capture } = splitAnswerAndCapture(raw);
         const capturePath = await writeAutoCaptureToInbox(capture);
         return sendJson(res, 200, { answer, capturePath, usedMemories });
@@ -1050,6 +1065,28 @@ function renderHtml() {
                 <summary class=\"small text-muted\">Used memories</summary>
                 <div id=\"usedMemories\" class=\"small mt-1\"></div>
               </details>
+              <details class=\"mt-2\">
+                <summary class=\"small text-muted\">Used sources</summary>
+                <div id=\"usedSources\" class=\"small mt-1\"></div>
+              </details>
+            </div>
+          </div>
+        </div>
+
+        <div class=\"col-12\">
+          <div class=\"card shadow-sm\">
+            <div class=\"card-body\">
+              <h2 class=\"h5\">Sources (read-only)</h2>
+              <div class=\"row g-2 align-items-end\">
+                <div class=\"col-12 col-lg-8\">
+                  <div class=\"small text-muted mb-1\">Pick a folder of markdown files (subfolders allowed)</div>
+                  <input id=\"sourcesFolder\" class=\"form-control\" type=\"file\" webkitdirectory multiple />
+                </div>
+                <div class=\"col-12 col-lg-4\">
+                  <button id=\"clearSourcesBtn\" class=\"btn btn-outline-secondary w-100\">Clear sources</button>
+                </div>
+              </div>
+              <div id=\"sourcesStatus\" class=\"small text-muted mt-2\"></div>
             </div>
           </div>
         </div>
@@ -1170,6 +1207,70 @@ function renderHtml() {
       const workStatus = document.getElementById('workStatus');
       const usedMemoriesEl = document.getElementById('usedMemories');
       const autoCaptureStatusEl = document.getElementById('autoCaptureStatus');
+      const usedSourcesEl = document.getElementById('usedSources');
+
+      const sourcesFolderEl = document.getElementById('sourcesFolder');
+      const clearSourcesBtn = document.getElementById('clearSourcesBtn');
+      const sourcesStatusEl = document.getElementById('sourcesStatus');
+
+      // Sources are kept in-memory in the browser (read-only), and only top excerpts are sent per request.
+      let sourcesIndex = [];
+
+      function tok(s) {
+        const m = String(s || '').toLowerCase().match(/[a-z0-9]{2,}/g);
+        return new Set(m || []);
+      }
+      function isectSize(a, b) { let c = 0; for (const x of a) if (b.has(x)) c++; return c; }
+
+      async function buildSourcesIndexFromFiles(fileList) {
+        const out = [];
+        for (const f of Array.from(fileList || [])) {
+          if (!String(f.name || '').toLowerCase().endsWith('.md')) continue;
+          const rel = f.webkitRelativePath || f.name;
+          const content = await f.text();
+          out.push({
+            path: rel,
+            content,
+            tokens: Array.from(tok(content)),
+          });
+        }
+        return out;
+      }
+
+      function retrieveTopSources(prompt, maxN) {
+        const pTok = tok(prompt);
+        const scored = sourcesIndex.map(s => {
+          const sTok = new Set(s.tokens || []);
+          const score = isectSize(sTok, pTok);
+          return { score, s };
+        }).filter(x => x.score > 0)
+          .sort((a,b) => b.score - a.score)
+          .slice(0, maxN)
+          .map(x => x.s);
+
+        return scored.map(s => ({
+          path: s.path,
+          content: String(s.content || '').slice(0, 4000) // keep payload bounded
+        }));
+      }
+
+      sourcesFolderEl.addEventListener('change', async () => {
+        sourcesStatusEl.textContent = 'Indexing sources...';
+        try {
+          sourcesIndex = await buildSourcesIndexFromFiles(sourcesFolderEl.files);
+          sourcesStatusEl.textContent = 'Loaded ' + sourcesIndex.length + ' markdown file(s).';
+        } catch (e) {
+          sourcesIndex = [];
+          sourcesStatusEl.textContent = 'Error indexing sources: ' + (e && e.message ? e.message : String(e));
+        }
+      });
+
+      clearSourcesBtn.onclick = () => {
+        sourcesIndex = [];
+        sourcesFolderEl.value = '';
+        sourcesStatusEl.textContent = '';
+        usedSourcesEl.textContent = '';
+      };
 
       // Persist model selection (radio buttons).
       const MODEL_DEFAULT = 'gpt-5-mini';
@@ -1255,9 +1356,12 @@ function renderHtml() {
         addTypingIndicator();
         const model = getSelectedModel();
         const history = loadHistory();
+        usedMemoriesEl.textContent = '(retrieving...)';
+        usedSourcesEl.textContent = sourcesIndex.length ? '(retrieving...)' : '(none)';
+        const sources = retrieveTopSources(workPrompt.value, 3);
         let resp = null;
         try {
-          resp = await postJson('/api/work', { prompt: workPrompt.value, model, history });
+          resp = await postJson('/api/work', { prompt: workPrompt.value, model, history, sources });
         } finally {
           removeTypingIndicator();
           workBtn.disabled = false;
@@ -1280,6 +1384,14 @@ function renderHtml() {
               .join('');
           }
         }
+        // Show which sources were sent (client-side retrieval).
+        if (sources && sources.length) {
+          usedSourcesEl.innerHTML = sources
+            .map(s => '<div><code>' + escapeHtml(s.path || '') + '</code></div>')
+            .join('');
+        } else {
+          usedSourcesEl.textContent = '(none)';
+        }
 
         if (resp.answer) {
           const h = loadHistory();
@@ -1298,6 +1410,7 @@ function renderHtml() {
         workStatus.textContent = '';
         autoCaptureStatusEl.textContent = '';
         usedMemoriesEl.textContent = '';
+        usedSourcesEl.textContent = '';
       };
 
       const dreamBtn = document.getElementById('dreamBtn');
