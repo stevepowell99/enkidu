@@ -342,6 +342,42 @@ async function writeEmbeddingsCache(cache) {
   await writeFileUtf8(EMBEDDINGS_FILE, JSON.stringify(cache, null, 2) + "\n");
 }
 
+async function ensureEmbeddingsCache() {
+  // Create an embeddings cache lazily so auto-embed can work immediately after the first capture.
+  const model = process.env.OPENAI_EMBEDDING_MODEL || DEFAULT_EMBEDDING_MODEL;
+  const existing = await loadEmbeddingsCache();
+  if (existing && existing.items) return existing;
+  const fresh = { model, generated_at: nowIso(), items: {} };
+  await writeEmbeddingsCache(fresh);
+  return fresh;
+}
+
+async function updateEmbeddingForMemoryPath(relPath) {
+  // Incrementally embed a single memories/*.md file.
+  // Uses hash of body (front-matter stripped) so we only re-embed when content changes.
+  const rel = String(relPath || "");
+  if (!rel.toLowerCase().startsWith("memories/") || !rel.toLowerCase().endsWith(".md")) return;
+
+  const abs = path.join(REPO_ROOT, rel);
+  assertWithinMemories(abs);
+  if (!fs.existsSync(abs)) return;
+
+  const md = await readFileUtf8(abs);
+  const body = stripFrontMatter(md).trim();
+  const h = sha256Hex(body);
+
+  const cache = await ensureEmbeddingsCache();
+  cache.items = cache.items || {};
+  const prev = cache.items[rel];
+  if (prev && prev.hash === h && Array.isArray(prev.vector)) return;
+
+  const embedText = body.slice(0, 12000);
+  const vec = await openaiEmbed(embedText, { model: cache.model || DEFAULT_EMBEDDING_MODEL });
+  cache.items[rel] = { hash: h, vector: vec };
+  cache.generated_at = nowIso();
+  await writeEmbeddingsCache(cache);
+}
+
 async function cmdEmbed(args = {}) {
   await ensureDirs();
   const model = String(args.model || "").trim() || process.env.OPENAI_EMBEDDING_MODEL || DEFAULT_EMBEDDING_MODEL;
@@ -596,6 +632,9 @@ async function writeAutoCaptureToInbox(capture) {
   const entries = await buildIndex();
   await writeIndex(entries);
 
+  // Keep embeddings up to date whenever a memory is created.
+  await updateEmbeddingForMemoryPath(safeRelPath(p));
+
   return safeRelPath(p);
 }
 
@@ -836,6 +875,7 @@ async function cmdCapture(args) {
   await writeFileUtf8(p, md);
   const entries = await buildIndex();
   await writeIndex(entries);
+  await updateEmbeddingForMemoryPath(safeRelPath(p));
   console.log(`Captured: ${safeRelPath(p)}`);
 }
 
@@ -952,6 +992,9 @@ async function cmdDream(args = {}) {
     "",
   ].join("\n");
   await writeFileUtf8(diaryPath, diaryMd);
+
+  // After dream edits, refresh embeddings (incremental via hashes).
+  await cmdEmbed({});
 
   console.log(`Dream complete. Diary: ${safeRelPath(diaryPath)}`);
 }
