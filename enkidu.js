@@ -1030,12 +1030,16 @@ function renderHtml() {
         let s = escapeHtml(md);
 
         // Fenced code blocks
-        s = s.replace(/```([\\s\\S]*?)```/g, (m, code) => {
+        const tick = String.fromCharCode(96); // avoids embedding ` in the outer HTML template string
+        const fence = tick + tick + tick;
+        const fenceRe = new RegExp(fence + '([\\\\s\\\\S]*?)' + fence, 'g');
+        s = s.replace(fenceRe, (m, code) => {
           return '<pre class=\"mb-0\"><code>' + code.replace(/^\\n|\\n$/g, '') + '</code></pre>';
         });
 
         // Inline code
-        s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
+        const inlineCodeRe = new RegExp(tick + '([^' + tick + ']*)' + tick, 'g');
+        s = s.replace(inlineCodeRe, '<code>$1</code>');
 
         // Bold **...**
         s = s.replace(/\\*\\*([^*]+)\\*\\*/g, '<strong>$1</strong>');
