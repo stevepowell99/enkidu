@@ -218,7 +218,26 @@
 
                   <div id="sourcesTextWrap" style="display:none;">
                     <textarea id="sourcesText" class="form-control" rows="7" placeholder="Paste any text or markdown here..."></textarea>
-                    <div class="small text-muted mt-1">This will be stored as a single verbatim source + a curated memory note.</div>
+                    <div class="row g-2 mt-2">
+                      <div class="col-12 col-lg-6">
+                        <div class="form-check">
+                          <input class="form-check-input" type="checkbox" id="sourcesSplitLong" checked>
+                          <label class="form-check-label small" for="sourcesSplitLong">Split long text into parts (better summaries + embeddings)</label>
+                        </div>
+                        <div class="input-group input-group-sm mt-1" style="max-width: 340px;">
+                          <span class="input-group-text">Max chars/part</span>
+                          <input id="sourcesSplitMaxChars" class="form-control" type="number" min="2000" max="80000" step="1000" value="12000">
+                        </div>
+                        <div class="small text-muted mt-1">Splits on markdown headings when possible; otherwise chunk by size.</div>
+                      </div>
+                      <div class="col-12 col-lg-6">
+                        <div class="form-check">
+                          <input class="form-check-input" type="checkbox" id="sourcesDreamAfter">
+                          <label class="form-check-label small" for="sourcesDreamAfter">Auto-organise after ingest (run Dream)</label>
+                        </div>
+                        <div class="small text-muted mt-1">Dream can move/merge new notes; diary will record what it did.</div>
+                      </div>
+                    </div>
                   </div>
                 </div>
                 <div class="col-12 col-lg-4">
@@ -348,6 +367,9 @@
       const sourcesFolderWrapEl = document.getElementById('sourcesFolderWrap');
       const sourcesTextWrapEl = document.getElementById('sourcesTextWrap');
       const sourcesTextEl = document.getElementById('sourcesText');
+      const sourcesSplitLongEl = document.getElementById('sourcesSplitLong');
+      const sourcesSplitMaxCharsEl = document.getElementById('sourcesSplitMaxChars');
+      const sourcesDreamAfterEl = document.getElementById('sourcesDreamAfter');
 
       function getSourcesMode() {
         return sourcesModeTextEl && sourcesModeTextEl.checked ? 'text' : 'folder';
@@ -440,9 +462,97 @@
               return;
             }
             const slug = slugifyForPath(meta.name || meta.context || text.slice(0, 80));
-            const rel = 'pasted/' + tsForPath() + '_' + slug + '.md';
-            sourcesStatusEl.textContent = 'Ingesting... uploading text';
-            const resp = await postJson('/api/sources/ingest', { model, meta, files: [{ path: rel, content: text }] });
+            const base = 'pasted/' + tsForPath() + '_' + slug;
+
+            function splitByHeadingsOrSize(s, maxChars) {
+              const lines = String(s || '').split(/\r?\n/);
+              const headingRe = /^#{1,3}\s+\S/;
+              let hasHeadings = false;
+              for (const ln of lines) { if (headingRe.test(ln)) { hasHeadings = true; break; } }
+
+              // Step 1: split into sections (by heading) if available; otherwise one big section.
+              const sections = [];
+              if (hasHeadings) {
+                let cur = [];
+                for (const ln of lines) {
+                  if (headingRe.test(ln) && cur.length) {
+                    sections.push(cur.join('\n').trim());
+                    cur = [];
+                  }
+                  cur.push(ln);
+                }
+                if (cur.length) sections.push(cur.join('\n').trim());
+              } else {
+                sections.push(String(s || '').trim());
+              }
+
+              // Step 2: pack sections into chunks <= maxChars; if a single section is too big, hard-slice it.
+              const chunks = [];
+              let buf = '';
+              function flush() {
+                const t = buf.trim();
+                if (t) chunks.push(t);
+                buf = '';
+              }
+
+              for (const sec of sections) {
+                const part = (sec || '').trim();
+                if (!part) continue;
+
+                if (!buf) {
+                  if (part.length <= maxChars) {
+                    buf = part;
+                  } else {
+                    // Hard-slice huge section on nearest newline boundary.
+                    let rest = part;
+                    while (rest.length > maxChars) {
+                      let cut = rest.lastIndexOf('\n', maxChars);
+                      if (cut < Math.floor(maxChars * 0.6)) cut = maxChars;
+                      chunks.push(rest.slice(0, cut).trim());
+                      rest = rest.slice(cut).trim();
+                    }
+                    if (rest) buf = rest;
+                  }
+                  continue;
+                }
+
+                if ((buf.length + 2 + part.length) <= maxChars) {
+                  buf = buf + '\n\n' + part;
+                } else {
+                  flush();
+                  if (part.length <= maxChars) {
+                    buf = part;
+                  } else {
+                    let rest = part;
+                    while (rest.length > maxChars) {
+                      let cut = rest.lastIndexOf('\n', maxChars);
+                      if (cut < Math.floor(maxChars * 0.6)) cut = maxChars;
+                      chunks.push(rest.slice(0, cut).trim());
+                      rest = rest.slice(cut).trim();
+                    }
+                    if (rest) buf = rest;
+                  }
+                }
+              }
+              flush();
+              return chunks;
+            }
+
+            let maxChars = parseInt(String(sourcesSplitMaxCharsEl && sourcesSplitMaxCharsEl.value ? sourcesSplitMaxCharsEl.value : '12000'), 10);
+            if (!Number.isFinite(maxChars) || maxChars < 2000) maxChars = 12000;
+            if (maxChars > 80000) maxChars = 80000;
+
+            const wantSplit = !!(sourcesSplitLongEl && sourcesSplitLongEl.checked);
+            const chunks = (wantSplit && text.length > maxChars) ? splitByHeadingsOrSize(text, maxChars) : [text];
+            const files = chunks.length === 1
+              ? [{ path: base + '.md', content: chunks[0] }]
+              : chunks.map((c, i) => ({
+                  path: base + '_part' + String(i + 1).padStart(2, '0') + '.md',
+                  content: c
+                }));
+
+            sourcesStatusEl.textContent = 'Ingesting... uploading text (' + files.length + ' part(s))';
+            const resp = await postJson('/api/sources/ingest', { model, meta, files });
             if (resp && resp.error) {
               sourcesStatusEl.textContent = 'Error: ' + resp.error;
               return;
@@ -450,6 +560,11 @@
             createdMem += (resp.createdMemories || []).length;
             createdSrc += (resp.createdSources || []).length;
             sourcesStatusEl.textContent = 'Done. Created ' + createdMem + ' memory notes; stored ' + createdSrc + ' source file(s).';
+
+            if (sourcesDreamAfterEl && sourcesDreamAfterEl.checked) {
+              sourcesStatusEl.textContent += ' Organising... (Dream)';
+              await doDream(model);
+            }
             return;
           }
 
@@ -689,6 +804,68 @@
       const diarySelect = document.getElementById('diarySelect');
       const diaryOut = document.getElementById('diaryOut');
 
+      async function doDream(model) {
+        dreamBtn.disabled = true;
+        refreshDiaryBtn.disabled = true;
+        diaryOut.textContent = 'Dream: planning (catalog + duplicates)...';
+        let ticker = null;
+        const started = Date.now();
+        function startTicker(prefix) {
+          if (ticker) clearInterval(ticker);
+          ticker = setInterval(() => {
+            const s = Math.floor((Date.now() - started) / 1000);
+            diaryOut.textContent = (prefix || diaryOut.textContent || 'Dream...') + '\n\n(elapsed: ' + s + 's)';
+          }, 1000);
+        }
+        try {
+          const plan = await postJson('/api/dream/plan', { model: model || getSelectedModel() });
+          if (plan && plan.error) {
+            diaryOut.textContent = plan.error || 'Error';
+            return plan;
+          }
+          const sum = plan.summary || {};
+          const wr = Array.isArray(plan.wantRead) ? plan.wantRead : [];
+          diaryOut.textContent =
+            'Dream plan complete.\n' +
+            '- notes: ' + (sum.note_count_total ?? '?') + '\n' +
+            '- catalog: ' + (sum.catalog_count ?? '?') + '\n' +
+            '- reading: ' + wr.length + ' file(s)\n' +
+            '- dupes: ' + ((sum.duplicates && sum.duplicates.exact_groups) ?? 0) + ' exact groups; ' +
+              ((sum.duplicates && sum.duplicates.near_pairs) ?? 0) + ' near pairs\n' +
+            (plan.note ? ('\nNote: ' + plan.note + '\n') : '') +
+            (wr.length ? ('\nWill read:\n' + wr.slice(0, 25).map(p => '- ' + p).join('\n') + (wr.length > 25 ? '\n- ...' : '') + '\n') : '');
+
+          diaryOut.textContent += '\nDream: executing (reading + applying ops + writing diary)...';
+          startTicker(diaryOut.textContent);
+          const exec = await postJson('/api/dream/execute', { planToken: plan.planToken, model: model || getSelectedModel(), wantRead: wr });
+          if (exec && exec.error) {
+            diaryOut.textContent = exec.error || 'Error';
+            return exec;
+          }
+          // Refresh and display new diary immediately.
+          await refreshDiary();
+          if (exec && exec.diaryPath) {
+            const found = Array.from(diarySelect.options).find(o => o.value === exec.diaryPath);
+            if (found) {
+              diarySelect.value = exec.diaryPath;
+              diaryOut.textContent = exec.diary || 'Dream complete. Diary written: ' + exec.diaryPath;
+            } else {
+              diaryOut.textContent = exec.diary || ('Dream complete. Diary written: ' + exec.diaryPath);
+            }
+          } else {
+            diaryOut.textContent = exec && exec.diary ? exec.diary : 'Dream complete.';
+          }
+          if (exec && exec.embedRefresh) {
+            diaryOut.textContent += '\n\n(embeddings refresh: ' + exec.embedRefresh + ')';
+          }
+          return exec;
+        } finally {
+          if (ticker) clearInterval(ticker);
+          dreamBtn.disabled = false;
+          refreshDiaryBtn.disabled = false;
+        }
+      }
+
       async function refreshDiary() {
         const resp = await getJson('/api/diary/list');
         diarySelect.innerHTML = '';
@@ -708,66 +885,7 @@
         diaryOut.textContent = resp.content || resp.error || 'Error';
       };
 
-      dreamBtn.onclick = async () => {
-        dreamBtn.disabled = true;
-        refreshDiaryBtn.disabled = true;
-        diaryOut.textContent = 'Dream: planning (catalog + duplicates)...';
-        let ticker = null;
-        const started = Date.now();
-        function startTicker(prefix) {
-          if (ticker) clearInterval(ticker);
-          ticker = setInterval(() => {
-            const s = Math.floor((Date.now() - started) / 1000);
-            diaryOut.textContent = (prefix || diaryOut.textContent || 'Dream...') + '\n\n(elapsed: ' + s + 's)';
-          }, 1000);
-        }
-        try {
-          const plan = await postJson('/api/dream/plan', { model: getSelectedModel() });
-          if (plan && plan.error) {
-            diaryOut.textContent = plan.error || 'Error';
-            return;
-          }
-          const sum = plan.summary || {};
-          const wr = Array.isArray(plan.wantRead) ? plan.wantRead : [];
-          diaryOut.textContent =
-            'Dream plan complete.\n' +
-            '- notes: ' + (sum.note_count_total ?? '?') + '\n' +
-            '- catalog: ' + (sum.catalog_count ?? '?') + '\n' +
-            '- reading: ' + wr.length + ' file(s)\n' +
-            '- dupes: ' + ((sum.duplicates && sum.duplicates.exact_groups) ?? 0) + ' exact groups; ' +
-              ((sum.duplicates && sum.duplicates.near_pairs) ?? 0) + ' near pairs\n' +
-            (plan.note ? ('\nNote: ' + plan.note + '\n') : '') +
-            (wr.length ? ('\nWill read:\n' + wr.slice(0, 25).map(p => '- ' + p).join('\n') + (wr.length > 25 ? '\n- ...' : '') + '\n') : '');
-
-          diaryOut.textContent += '\nDream: executing (reading + applying ops + writing diary)...';
-          startTicker(diaryOut.textContent);
-          const exec = await postJson('/api/dream/execute', { planToken: plan.planToken, model: getSelectedModel(), wantRead: wr });
-          if (exec && exec.error) {
-            diaryOut.textContent = exec.error || 'Error';
-            return;
-          }
-          // Refresh and display new diary immediately.
-          await refreshDiary();
-          if (exec && exec.diaryPath) {
-            const found = Array.from(diarySelect.options).find(o => o.value === exec.diaryPath);
-            if (found) {
-              diarySelect.value = exec.diaryPath;
-              diaryOut.textContent = exec.diary || 'Dream complete. Diary written: ' + exec.diaryPath;
-            } else {
-              diaryOut.textContent = exec.diary || ('Dream complete. Diary written: ' + exec.diaryPath);
-            }
-          } else {
-            diaryOut.textContent = exec && exec.diary ? exec.diary : 'Dream complete.';
-          }
-          if (exec && exec.embedRefresh) {
-            diaryOut.textContent += '\n\n(embeddings refresh: ' + exec.embedRefresh + ')';
-          }
-        } finally {
-          if (ticker) clearInterval(ticker);
-          dreamBtn.disabled = false;
-          refreshDiaryBtn.disabled = false;
-        }
-      };
+      dreamBtn.onclick = async () => doDream(getSelectedModel());
 
       refreshDiaryBtn.onclick = refreshDiary;
 
