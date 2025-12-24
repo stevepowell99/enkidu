@@ -34,6 +34,7 @@ const WORK_INSTRUCTION_FILE = path.join(INSTRUCTIONS_DIR, "work.md");
 const DREAM_INSTRUCTION_FILE = path.join(INSTRUCTIONS_DIR, "dream.md");
 const SOURCES_INSTRUCTION_FILE = path.join(INSTRUCTIONS_DIR, "sources.md");
 const DOTENV_FILE = path.join(REPO_ROOT, ".env");
+const PUBLIC_INDEX_FILE = path.join(REPO_ROOT, "public", "index.html");
 
 const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
 const DEFAULT_OPENAI_MODEL = "gpt-4o-mini";
@@ -144,6 +145,12 @@ async function sbUpsertMemoryRow({ path: relPath, content, title, tags, importan
     updated_at: nowIso(),
   };
   await supabaseRest("memories", { method: "POST", query: { on_conflict: "path", select: "id" }, body: [row] });
+}
+
+async function sbUpsertSourceRow({ path: relPath, content }) {
+  const p = assertSafeMemoriesRelPath(relPath);
+  const row = { path: p, content: String(content || ""), updated_at: nowIso() };
+  await supabaseRest("sources", { method: "POST", query: { on_conflict: "path", select: "id" }, body: [row] });
 }
 
 async function sbGetMemoryByPath(relPath) {
@@ -482,19 +489,38 @@ async function openaiEmbed(text, opts = {}) {
   const url = `${baseUrl}/embeddings`;
   const payload = { model, input: String(text || "") };
 
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
+  const maxRetries = Math.max(0, Math.min(8, Number(process.env.ENKIDU_OPENAI_RETRIES ?? 4) || 4));
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const resp = await fetch(url, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
 
-  const raw = await resp.text();
-  if (!resp.ok) throw new Error(`OpenAI HTTP ${resp.status}: ${raw}`);
+      const raw = await resp.text();
+      if (!resp.ok) {
+        const msg = formatOpenAiHttpError(resp.status, raw);
+        if (attempt < maxRetries && isRetryableHttpStatus(resp.status)) {
+          await sleepMs(backoffMs(attempt));
+          continue;
+        }
+        throw new Error(msg);
+      }
 
-  const data = JSON.parse(raw);
-  const vec = data?.data?.[0]?.embedding;
-  if (!Array.isArray(vec)) throw new Error(`Unexpected embeddings response: ${raw}`);
-  return vec;
+      const data = safeJsonParse(raw);
+      const vec = data?.data?.[0]?.embedding;
+      if (!Array.isArray(vec)) throw new Error(`Unexpected embeddings response: ${truncateForError(raw)}`);
+      return vec;
+    } catch (err) {
+      if (attempt < maxRetries && isRetryableNetworkError(err)) {
+        await sleepMs(backoffMs(attempt));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error("OpenAI embeddings failed after retries");
 }
 
 async function loadEmbeddingsCache() {
@@ -567,6 +593,8 @@ async function listStoredSourceVerbatimFiles() {
 }
 
 async function retrieveTopSourcesByEmbeddings(queries, topN) {
+  // Sources embeddings are local-file based for now.
+  if (isSupabaseMode()) return [];
   const cache = await loadSourceEmbeddingsCache();
   if (!cache || !cache.items) return [];
 
@@ -919,20 +947,22 @@ async function writeAutoCaptureToInbox(capture) {
 
   if (!title || !text) return null;
 
-  // De-dup: if an identical capture already exists in inbox, don't write it again.
-  try {
-    const inboxDir = path.join(MEMORIES_DIR, "inbox");
-    const existing = await fsp.readdir(inboxDir);
-    for (const name of existing) {
-      if (!name.toLowerCase().endsWith(".md")) continue;
-      const p = path.join(inboxDir, name);
-      const md = await readFileUtf8(p);
-      const fm = parseFrontMatter(md);
-      const body = stripFrontMatter(md).trim();
-      if (String(fm.title || "").trim() === title && body === text) return null;
+  // De-dup is local-only (filesystem scan). Keep supabase mode simple.
+  if (!isSupabaseMode()) {
+    try {
+      const inboxDir = path.join(MEMORIES_DIR, "inbox");
+      const existing = await fsp.readdir(inboxDir);
+      for (const name of existing) {
+        if (!name.toLowerCase().endsWith(".md")) continue;
+        const p = path.join(inboxDir, name);
+        const md = await readFileUtf8(p);
+        const fm = parseFrontMatter(md);
+        const body = stripFrontMatter(md).trim();
+        if (String(fm.title || "").trim() === title && body === text) return null;
+      }
+    } catch {
+      // If inbox can't be read for any reason, just proceed.
     }
-  } catch {
-    // If inbox can't be read for any reason, just proceed.
   }
 
   let tags = [];
@@ -947,8 +977,7 @@ async function writeAutoCaptureToInbox(capture) {
 
   const created = nowIso();
   const fname = `${filenameTimestamp()}_${slugify(title).slice(0, 60)}.md`.toLowerCase();
-  const p = path.join(MEMORIES_DIR, "inbox", fname);
-  assertWithinMemories(p);
+  const rel = `memories/inbox/${fname}`;
 
   const md = [
     "---",
@@ -963,15 +992,19 @@ async function writeAutoCaptureToInbox(capture) {
     "",
   ].join("\n");
 
-  await writeFileUtf8(p, md);
+  if (isSupabaseMode()) {
+    await sbUpsertMemoryRow({ path: rel, content: md, title, tags, importance: 1 });
+    return rel;
+  }
 
+  const p = path.join(REPO_ROOT, rel);
+  assertWithinMemories(p);
+  await writeFileUtf8(p, md);
   const entries = await buildIndex();
   await writeIndex(entries);
-
   // Keep embeddings up to date whenever a memory is created.
-  await updateEmbeddingForMemoryPath(safeRelPath(p));
-
-  return safeRelPath(p);
+  await updateEmbeddingForMemoryPath(rel);
+  return rel;
 }
 
 async function fetchWebText(url) {
@@ -1009,7 +1042,25 @@ function normaliseHistory(history) {
   return out.slice(-20);
 }
 
-async function workCore({ prompt, model, history, runNow }) {
+// -----------------------------
+// Work pipeline split (plan -> answer)
+// -----------------------------
+
+const WORK_PLAN_CACHE = new Map(); // planToken -> { createdAtMs, plan }
+const WORK_PLAN_TTL_MS = 2 * 60 * 1000;
+
+function makeWorkPlanToken() {
+  return crypto.randomBytes(16).toString("hex");
+}
+
+function pruneWorkPlanCache() {
+  const now = Date.now();
+  for (const [k, v] of WORK_PLAN_CACHE.entries()) {
+    if (!v || now - (v.createdAtMs || 0) > WORK_PLAN_TTL_MS) WORK_PLAN_CACHE.delete(k);
+  }
+}
+
+async function workPlanCore({ prompt, model, history, runNow }) {
   const instruction = await readInstruction(WORK_INSTRUCTION_FILE);
   const fast = Boolean(runNow);
   const route = fast ? { needRecency: false, needExpansion: false } : heuristicRoute(prompt);
@@ -1069,10 +1120,30 @@ async function workCore({ prompt, model, history, runNow }) {
   }));
   const usedSources = storedSources.map((s) => ({ path: s.path || "" }));
 
+  return {
+    prompt,
+    model,
+    instruction,
+    historyNorm: normaliseHistory(history),
+    userContent: userParts.join("\n\n"),
+    usedMemories,
+    usedSources,
+    route,
+    queries,
+    fast,
+  };
+}
+
+async function workAnswerCore(plan) {
+  const instruction = String(plan?.instruction || "");
+  const historyNorm = Array.isArray(plan?.historyNorm) ? plan.historyNorm : [];
+  const userContent = String(plan?.userContent || "");
+  const model = String(plan?.model || "").trim();
+
   const messages = [
     { role: "system", content: instruction },
-    ...normaliseHistory(history),
-    { role: "user", content: userParts.join("\n\n") },
+    ...historyNorm,
+    { role: "user", content: userContent },
   ];
 
   // First attempt
@@ -1080,12 +1151,12 @@ async function workCore({ prompt, model, history, runNow }) {
 
   // If the model requests a web fetch, do ONE fetch then ask again with the fetched text.
   const url = extractWebFetchUrl(raw1);
-  if (!url) return { raw: raw1, usedMemories, usedSources };
+  if (!url) return { raw: raw1 };
 
   const webText = await fetchWebText(url);
   const messages2 = [
     { role: "system", content: instruction },
-    ...normaliseHistory(history),
+    ...historyNorm,
     {
       role: "user",
       content:
@@ -1094,7 +1165,7 @@ async function workCore({ prompt, model, history, runNow }) {
         "CONTENT_START\n" +
         webText +
         "\nCONTENT_END\n\n" +
-        userParts.join("\n\n"),
+        userContent,
     },
   ];
 
@@ -1103,11 +1174,63 @@ async function workCore({ prompt, model, history, runNow }) {
   if (url2) {
     return {
       raw: "I tried one web fetch already, but you requested another. Please answer using the fetched content I provided.",
-      usedMemories,
-      usedSources,
     };
   }
-  return { raw: raw2, usedMemories, usedSources };
+  return { raw: raw2 };
+}
+
+async function workCore({ prompt, model, history, runNow }) {
+  const plan = await workPlanCore({ prompt, model, history, runNow });
+  const { raw } = await workAnswerCore(plan);
+  return { raw, usedMemories: plan.usedMemories, usedSources: plan.usedSources };
+}
+
+function truncateForError(s, maxLen = 600) {
+  const t = String(s || "").replace(/\s+/g, " ").trim();
+  if (t.length <= maxLen) return t;
+  return t.slice(0, maxLen) + " …";
+}
+
+function isRetryableHttpStatus(status) {
+  const s = Number(status) || 0;
+  return s === 408 || s === 429 || s === 500 || s === 502 || s === 503 || s === 504;
+}
+
+function isRetryableNetworkError(err) {
+  const msg = String(err?.message || err || "").toLowerCase();
+  // Node fetch can throw on transient network failures.
+  return (
+    msg.includes("fetch failed") ||
+    msg.includes("socket hang up") ||
+    msg.includes("econnreset") ||
+    msg.includes("etimedout") ||
+    msg.includes("eai_again") ||
+    msg.includes("enotfound")
+  );
+}
+
+function backoffMs(attempt) {
+  const base = 300; // ms
+  const cap = 5000;
+  const exp = Math.min(cap, base * Math.pow(2, attempt));
+  const jitter = Math.floor(Math.random() * 180);
+  return exp + jitter;
+}
+
+async function sleepMs(ms) {
+  await new Promise((r) => setTimeout(r, ms));
+}
+
+function formatOpenAiHttpError(status, raw) {
+  const s = Number(status) || 0;
+  const snippet = truncateForError(raw);
+  if (s === 502 || s === 503 || s === 504) {
+    return `OpenAI temporary upstream error (HTTP ${s}). Please retry. Details: ${snippet}`;
+  }
+  if (s === 429) {
+    return `OpenAI rate limit (HTTP 429). Please retry shortly. Details: ${snippet}`;
+  }
+  return `OpenAI HTTP ${s}: ${snippet}`;
 }
 
 async function openaiChat(messages, opts = {}) {
@@ -1127,19 +1250,38 @@ async function openaiChat(messages, opts = {}) {
     payload.temperature = 0.2;
   }
 
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
+  const maxRetries = Math.max(0, Math.min(8, Number(process.env.ENKIDU_OPENAI_RETRIES ?? 4) || 4));
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const resp = await fetch(url, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
 
-  const raw = await resp.text();
-  if (!resp.ok) throw new Error(`OpenAI HTTP ${resp.status}: ${raw}`);
+      const raw = await resp.text();
+      if (!resp.ok) {
+        const msg = formatOpenAiHttpError(resp.status, raw);
+        if (attempt < maxRetries && isRetryableHttpStatus(resp.status)) {
+          await sleepMs(backoffMs(attempt));
+          continue;
+        }
+        throw new Error(msg);
+      }
 
-  const data = JSON.parse(raw);
-  const content = data?.choices?.[0]?.message?.content;
-  if (!content) throw new Error(`Unexpected OpenAI response: ${raw}`);
-  return content;
+      const data = safeJsonParse(raw);
+      const content = data?.choices?.[0]?.message?.content;
+      if (!content) throw new Error(`Unexpected OpenAI response: ${truncateForError(raw)}`);
+      return content;
+    } catch (err) {
+      if (attempt < maxRetries && isRetryableNetworkError(err)) {
+        await sleepMs(backoffMs(attempt));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error("OpenAI chat failed after retries");
 }
 
 async function readInstruction(filePath) {
@@ -1183,7 +1325,7 @@ function parseArgv(argv) {
 }
 
 async function cmdCapture(args) {
-  await ensureDirs();
+  if (!isSupabaseMode()) await ensureDirs();
   const title = String(args.title || "").trim();
   const text = String(args.text || "").trim();
   const tags = String(args.tags || "")
@@ -1196,7 +1338,7 @@ async function cmdCapture(args) {
 
   const created = nowIso();
   const fname = `${filenameTimestamp()}_${slugify(title).slice(0, 60)}.md`.toLowerCase();
-  const p = path.join(MEMORIES_DIR, "inbox", fname);
+  const rel = `memories/inbox/${fname}`;
 
   const md = [
     "---",
@@ -1211,11 +1353,18 @@ async function cmdCapture(args) {
     "",
   ].join("\n");
 
+  if (isSupabaseMode()) {
+    await sbUpsertMemoryRow({ path: rel, content: md, title, tags, importance: 1 });
+    console.log(`Captured: ${rel}`);
+    return;
+  }
+
+  const p = path.join(REPO_ROOT, rel);
   await writeFileUtf8(p, md);
   const entries = await buildIndex();
   await writeIndex(entries);
-  await updateEmbeddingForMemoryPath(safeRelPath(p));
-  console.log(`Captured: ${safeRelPath(p)}`);
+  await updateEmbeddingForMemoryPath(rel);
+  console.log(`Captured: ${rel}`);
 }
 
 async function cmdWork(args) {
@@ -1231,6 +1380,7 @@ async function cmdWork(args) {
 }
 
 async function cmdDream(args = {}) {
+  if (isSupabaseMode()) return await cmdDreamSupabase(args);
   // Soft dream: LLM decides what to do, via editable instructions.
   // Code stays dumb: it provides context, validates ops, applies ops under memories/, writes diary entry.
   await ensureDirs();
@@ -1338,6 +1488,96 @@ async function cmdDream(args = {}) {
   console.log(`Dream complete. Diary: ${safeRelPath(diaryPath)}`);
 }
 
+async function cmdDreamSupabase(args = {}) {
+  // Supabase-backed dream: only operates on memories table (instructions are read-only in hosted).
+  const instruction = await readInstruction(DREAM_INSTRUCTION_FILE);
+  const model = String(args.model || "").trim();
+
+  const rows = await supabaseRest("memories", {
+    method: "GET",
+    query: { select: "path,title,tags,content,created_at,updated_at,importance", order: "updated_at.desc", limit: "200" },
+  });
+
+  const files = (Array.isArray(rows) ? rows : []).map((r) => ({
+    path: String(r?.path || ""),
+    title: r?.title,
+    tags: r?.tags,
+    created: r?.created_at,
+    updated: r?.updated_at,
+    content: r?.content,
+  }));
+
+  const instructionFiles = [];
+  for (const rel of ["instructions/work.md", "instructions/dream.md"]) {
+    const abs = path.join(REPO_ROOT, rel);
+    if (!fs.existsSync(abs)) continue;
+    instructionFiles.push({ path: rel, content: (await readFileUtf8(abs)).trim() });
+  }
+
+  const context = {
+    now: nowIso(),
+    writable_roots: ["memories/"],
+    note_count: files.length,
+    files,
+    instructions: instructionFiles,
+    output_contract: {
+      ops: [
+        { op: "mkdir", path: "memories/someFolder" },
+        { op: "write", path: "memories/path.md", content: "..." },
+        { op: "move", from: "memories/a.md", to: "memories/b.md" },
+        { op: "delete", path: "memories/old.md" },
+      ],
+      diary: "markdown string describing what you did and why",
+    },
+  };
+
+  const messages = [
+    { role: "system", content: instruction },
+    {
+      role: "user",
+      content:
+        "You are running DREAM.\n\n" +
+        "You may only operate inside the memories/ folder.\n\n" +
+        "Return ONLY valid JSON matching output_contract.\n\n" +
+        JSON.stringify(context, null, 2),
+    },
+  ];
+
+  const raw = await openaiChat(messages, { model });
+  const parsed = safeJsonParse(raw);
+  if (!parsed) throw new Error("Dream did not return valid JSON.");
+
+  const ops = Array.isArray(parsed.ops) ? parsed.ops : [];
+  const diary = String(parsed.diary || "").trim();
+  if (!diary) throw new Error("Dream JSON missing diary.");
+
+  const applied = await applyDreamOpsSupabase(ops);
+
+  // Write diary entry as a memory row.
+  const diaryTs = filenameTimestamp();
+  const diaryPath = `memories/diary/${diaryTs}_dream.md`.toLowerCase();
+  const diaryTitle = `Dream diary (${nowIso()})`;
+  const diaryMd = [
+    "---",
+    `title: ${diaryTitle}`,
+    `created: ${nowIso()}`,
+    "tags: diary, dream",
+    "source: dream",
+    "---",
+    "",
+    diary,
+    "",
+    "## Applied ops",
+    "",
+    "```json",
+    JSON.stringify(applied, null, 2),
+    "```",
+    "",
+  ].join("\n");
+
+  await sbUpsertMemoryRow({ path: diaryPath, content: diaryMd, title: diaryTitle, tags: ["diary", "dream"], importance: 0 });
+}
+
 function safeJsonParse(s) {
   // Allow models to accidentally wrap JSON in ``` fences.
   const text = String(s || "").trim();
@@ -1409,8 +1649,51 @@ async function applyDreamOps(ops) {
   return applied;
 }
 
+async function applyDreamOpsSupabase(ops) {
+  // Apply ops against Supabase memories table (MVP).
+  const applied = [];
+
+  for (const op of ops) {
+    const kind = String(op?.op || "").toLowerCase();
+
+    if (kind === "mkdir") {
+      const p = assertSafeMemoriesRelPath(String(op?.path || ""));
+      applied.push({ op: "mkdir", path: p, note: "virtual_dir" });
+      continue;
+    }
+
+    if (kind === "write") {
+      const p = assertSafeMemoriesRelPath(String(op?.path || ""));
+      const content = String(op?.content || "");
+      await sbUpsertMemoryRow({ path: p, content });
+      applied.push({ op: "write", path: p, bytes: Buffer.byteLength(content, "utf8") });
+      continue;
+    }
+
+    if (kind === "move") {
+      const from = assertSafeMemoriesRelPath(String(op?.from || ""));
+      const to = assertSafeMemoriesRelPath(String(op?.to || ""));
+      await sbMoveMemory(from, to);
+      applied.push({ op: "move", from, to });
+      continue;
+    }
+
+    if (kind === "delete") {
+      const p = assertSafeMemoriesRelPath(String(op?.path || ""));
+      await sbDeleteMemoryByPath(p);
+      applied.push({ op: "delete", path: p });
+      continue;
+    }
+
+    applied.push({ op: "ignored", reason: "unknown_op", raw: op });
+  }
+
+  return applied;
+}
+
 async function ingestSourcesBatch(files, model) {
   // files: [{path, content}] from UI folder picker
+  if (isSupabaseMode()) return await ingestSourcesBatchSupabase(files, model);
   await ensureDirs();
   const sys = await readInstruction(SOURCES_INSTRUCTION_FILE);
 
@@ -1512,6 +1795,99 @@ async function ingestSourcesBatch(files, model) {
   return { createdSources, createdMemories };
 }
 
+async function ingestSourcesBatchSupabase(files, model) {
+  // Supabase-backed sources ingest: store verbatim in `sources`, curated notes in `memories`.
+  const sys = await readInstruction(SOURCES_INSTRUCTION_FILE);
+  const createdSources = [];
+  const createdMemories = [];
+
+  for (const f of files) {
+    const originalPath = String(f?.path || "").trim() || "unknown.md";
+    const normPath = originalPath.replaceAll("\\", "/");
+    const parts = normPath.split("/").filter(Boolean);
+    if (parts.some((p) => p.startsWith("."))) continue;
+
+    const content = String(f?.content || "");
+    if (!content.trim()) continue;
+
+    const sourceId = sha256Hex(content).slice(0, 12);
+    const baseSlug = slugify(path.basename(normPath).replace(/\.md$/i, "")) || "source";
+    const verbatimName = `${sourceId}_${baseSlug}.md`.toLowerCase();
+    const verbatimRel = `memories/sources/verbatim/${verbatimName}`;
+
+    const verbatimMd = [
+      "---",
+      `title: ${baseSlug}`,
+      `created: ${nowIso()}`,
+      "tags: source, verbatim",
+      "importance: 0",
+      "source: sources_ingest",
+      `source_id: ${sourceId}`,
+      `original_path: ${normPath}`,
+      "---",
+      "",
+      content,
+      "",
+    ].join("\n");
+
+    await sbUpsertSourceRow({ path: verbatimRel, content: verbatimMd });
+    createdSources.push({ original_path: normPath, verbatim_path: verbatimRel });
+
+    // Ask model to produce a curated memory note (filed like dream would).
+    const userPayload = JSON.stringify({ original_path: normPath, source_content: content.slice(0, 12000) }, null, 2);
+    const messages = [
+      { role: "system", content: sys },
+      { role: "user", content: userPayload },
+    ];
+    const raw = await openaiChat(messages, { model });
+    const parsed = safeJsonParse(raw);
+    if (!parsed) continue;
+
+    const dest = String(parsed.dest || "inbox").toLowerCase();
+    const allowed = new Set(["inbox", "people", "projects", "howto"]);
+    if (!allowed.has(dest)) continue;
+
+    const title = String(parsed.title || baseSlug).trim() || baseSlug;
+    const tags = String(parsed.tags || "source").trim();
+    const importance = Number.isFinite(Number(parsed.importance)) ? Math.max(0, Math.min(3, Number(parsed.importance))) : 1;
+    const summaryMd = String(parsed.summary_md || "").trim();
+    const why = String(parsed.why || "").trim();
+
+    const created = nowIso();
+    const fname = `${filenameTimestamp()}_${slugify(title).slice(0, 60)}.md`.toLowerCase();
+    const memRel = `memories/${dest}/${fname}`;
+
+    const mem = [
+      "---",
+      `title: ${title}`,
+      `created: ${created}`,
+      `tags: ${tags}`,
+      `importance: ${importance}`,
+      "source: sources_ingest",
+      `source_ref: ${verbatimRel}`,
+      `original_path: ${normPath}`,
+      "---",
+      "",
+      summaryMd,
+      "",
+      why ? `Why: ${why}` : "",
+      "",
+    ].join("\n");
+
+    await sbUpsertMemoryRow({
+      path: memRel,
+      content: mem,
+      title,
+      tags: tags.split(/[,;]/).map((t) => t.trim()).filter(Boolean),
+      importance,
+    });
+
+    createdMemories.push({ path: memRel, title, dest, source_ref: verbatimRel });
+  }
+
+  return { createdSources, createdMemories };
+}
+
 // -----------------------------
 // Tiny UI server (Bootstrap CDN)
 // -----------------------------
@@ -1545,6 +1921,141 @@ function parseFormUrlEncoded(body) {
   return out;
 }
 
+export async function apiHandleRequest({ method, pathname, searchParams, headers, bodyText }) {
+  // Purpose: shared API handler for both the local Node server and Netlify Functions.
+  const m = String(method || "GET").toUpperCase();
+  const p = String(pathname || "/");
+
+  if (m === "POST" && p === "/api/work/plan") {
+    const data = String(headers?.["content-type"] || "").includes("application/json")
+      ? safeJsonParse(bodyText) || {}
+      : parseFormUrlEncoded(bodyText);
+    const prompt = String(data.prompt || "").trim();
+    const model = String(data.model || "").trim();
+    const history = data.history;
+    const runNow = Boolean(data.runNow);
+    if (!prompt) return { statusCode: 400, json: { error: "Missing prompt" } };
+
+    pruneWorkPlanCache();
+    const plan = await workPlanCore({ prompt, model, history, runNow });
+    const planToken = makeWorkPlanToken();
+    WORK_PLAN_CACHE.set(planToken, { createdAtMs: Date.now(), plan });
+
+    return {
+      statusCode: 200,
+      json: {
+        planToken,
+        usedMemories: plan.usedMemories,
+        usedSources: plan.usedSources,
+        route: plan.route,
+        queries: plan.queries,
+        fast: plan.fast,
+      },
+    };
+  }
+
+  if (m === "POST" && p === "/api/work/answer") {
+    const data = String(headers?.["content-type"] || "").includes("application/json")
+      ? safeJsonParse(bodyText) || {}
+      : parseFormUrlEncoded(bodyText);
+    const planToken = String(data.planToken || "").trim();
+    if (!planToken) return { statusCode: 400, json: { error: "Missing planToken" } };
+
+    pruneWorkPlanCache();
+    const hit = WORK_PLAN_CACHE.get(planToken);
+    if (!hit || !hit.plan) return { statusCode: 400, json: { error: "Unknown/expired planToken" } };
+    const plan = hit.plan;
+    const { raw } = await workAnswerCore(plan);
+    WORK_PLAN_CACHE.delete(planToken);
+    const { answer, capture } = splitAnswerAndCapture(raw);
+    const capturePath = await writeAutoCaptureToInbox(capture);
+    await appendSessionEvent("user", String(plan.prompt || ""));
+    await appendSessionEvent("assistant", String(answer || "").trim());
+    return { statusCode: 200, json: { answer, capturePath, usedMemories: plan.usedMemories, usedSources: plan.usedSources } };
+  }
+
+  if (m === "POST" && p === "/api/work") {
+    const data = String(headers?.["content-type"] || "").includes("application/json")
+      ? safeJsonParse(bodyText) || {}
+      : parseFormUrlEncoded(bodyText);
+    const prompt = String(data.prompt || "").trim();
+    const model = String(data.model || "").trim();
+    const history = data.history;
+    const runNow = Boolean(data.runNow);
+    if (!prompt) return { statusCode: 400, json: { error: "Missing prompt" } };
+    const { raw, usedMemories, usedSources } = await workCore({ prompt, model, history, runNow });
+    const { answer, capture } = splitAnswerAndCapture(raw);
+    const capturePath = await writeAutoCaptureToInbox(capture);
+    await appendSessionEvent("user", prompt);
+    await appendSessionEvent("assistant", String(answer || "").trim());
+    return { statusCode: 200, json: { answer, capturePath, usedMemories, usedSources } };
+  }
+
+  if (m === "POST" && p === "/api/sources/ingest") {
+    const data = String(headers?.["content-type"] || "").includes("application/json")
+      ? safeJsonParse(bodyText) || {}
+      : parseFormUrlEncoded(bodyText);
+    const model = String(data.model || "").trim();
+    const files = Array.isArray(data.files) ? data.files : [];
+    const out = await ingestSourcesBatch(files, model);
+    return { statusCode: 200, json: { ok: true, ...out } };
+  }
+
+  if (m === "POST" && p === "/api/dream") {
+    const data = String(headers?.["content-type"] || "").includes("application/json")
+      ? safeJsonParse(bodyText) || {}
+      : parseFormUrlEncoded(bodyText);
+    const model = String(data.model || "").trim();
+    await cmdDream({ model });
+    return { statusCode: 200, json: { ok: true } };
+  }
+
+  if (m === "GET" && p === "/api/diary/list") {
+    if (isSupabaseMode()) {
+      const out = await sbListDiaryFiles();
+      return { statusCode: 200, json: { files: out } };
+    }
+    const diaryDir = path.join(MEMORIES_DIR, "diary");
+    const files = fs.existsSync(diaryDir) ? await fsp.readdir(diaryDir) : [];
+    const out = files
+      .filter((f) => f.toLowerCase().endsWith(".md"))
+      .sort((a, b) => b.localeCompare(a))
+      .map((f) => `memories/diary/${f}`);
+    return { statusCode: 200, json: { files: out } };
+  }
+
+  if (m === "GET" && p === "/api/list") {
+    const rel = String(searchParams?.get("path") || "memories").trim();
+    if (isSupabaseMode()) {
+      const out = await sbListVirtualDir(rel);
+      return { statusCode: 200, json: out };
+    }
+    const abs = path.join(REPO_ROOT, rel);
+    assertWithinMemories(abs);
+    const ents = await fsp.readdir(abs, { withFileTypes: true });
+    const items = ents
+      .map((e) => ({ name: e.name, type: e.isDirectory() ? "dir" : "file" }))
+      .sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === "dir" ? -1 : 1));
+    return { statusCode: 200, json: { path: rel, items } };
+  }
+
+  if (m === "GET" && p === "/api/read") {
+    const rel = String(searchParams?.get("path") || "").trim();
+    if (!rel) return { statusCode: 400, json: { error: "Missing path" } };
+    if (isSupabaseMode()) {
+      const row = await sbGetMemoryByPath(rel);
+      if (!row) return { statusCode: 404, json: { error: "Not found" } };
+      return { statusCode: 200, json: { path: String(row.path || rel), content: String(row.content || "") } };
+    }
+    const abs = path.join(REPO_ROOT, rel);
+    assertWithinMemories(abs);
+    const content = await readFileUtf8(abs);
+    return { statusCode: 200, json: { path: rel, content } };
+  }
+
+  return { statusCode: 404, json: { error: "Not found" } };
+}
+
 async function cmdServe(args) {
   if (String(args.watch || "").toLowerCase() === "true") {
     return await cmdServeWatch(args);
@@ -1557,7 +2068,8 @@ async function cmdServe(args) {
       const u = new URL(req.url || "/", `http://localhost:${port}`);
 
       if (req.method === "GET" && u.pathname === "/") {
-        return sendText(res, 200, renderHtml(), "text/html; charset=utf-8");
+        const html = await readFileUtf8(PUBLIC_INDEX_FILE);
+        return sendText(res, 200, html, "text/html; charset=utf-8");
       }
 
       if (req.method === "GET" && u.pathname === "/favicon.ico") {
@@ -1566,73 +2078,16 @@ async function cmdServe(args) {
         return res.end();
       }
 
-      if (req.method === "POST" && u.pathname === "/api/work") {
-        const body = await readRequestBody(req);
-        const data = req.headers["content-type"]?.includes("application/json")
-          ? safeJsonParse(body) || {}
-          : parseFormUrlEncoded(body);
-        const prompt = String(data.prompt || "").trim();
-        const model = String(data.model || "").trim();
-        const history = data.history;
-        const runNow = Boolean(data.runNow);
-        if (!prompt) return sendJson(res, 400, { error: "Missing prompt" });
-        const { raw, usedMemories, usedSources } = await workCore({ prompt, model, history, runNow });
-        const { answer, capture } = splitAnswerAndCapture(raw);
-        const capturePath = await writeAutoCaptureToInbox(capture);
-        await appendSessionEvent("user", prompt);
-        await appendSessionEvent("assistant", String(answer || "").trim());
-        return sendJson(res, 200, { answer, capturePath, usedMemories, usedSources });
-      }
-
-      if (req.method === "POST" && u.pathname === "/api/sources/ingest") {
-        const body = await readRequestBody(req);
-        const data = req.headers["content-type"]?.includes("application/json")
-          ? safeJsonParse(body) || {}
-          : parseFormUrlEncoded(body);
-        const model = String(data.model || "").trim();
-        const files = Array.isArray(data.files) ? data.files : [];
-        const out = await ingestSourcesBatch(files, model);
-        return sendJson(res, 200, { ok: true, ...out });
-      }
-
-      if (req.method === "POST" && u.pathname === "/api/dream") {
-        const body = await readRequestBody(req);
-        const data = req.headers["content-type"]?.includes("application/json")
-          ? safeJsonParse(body) || {}
-          : parseFormUrlEncoded(body);
-        const model = String(data.model || "").trim();
-        await cmdDream({ model });
-        return sendJson(res, 200, { ok: true });
-      }
-
-      if (req.method === "GET" && u.pathname === "/api/diary/list") {
-        const diaryDir = path.join(MEMORIES_DIR, "diary");
-        const files = fs.existsSync(diaryDir) ? await fsp.readdir(diaryDir) : [];
-        const out = files
-          .filter((f) => f.toLowerCase().endsWith(".md"))
-          .sort((a, b) => b.localeCompare(a))
-          .map((f) => `memories/diary/${f}`);
-        return sendJson(res, 200, { files: out });
-      }
-
-      if (req.method === "GET" && u.pathname === "/api/list") {
-        const rel = String(u.searchParams.get("path") || "memories").trim();
-        const abs = path.join(REPO_ROOT, rel);
-        assertWithinMemories(abs);
-        const ents = await fsp.readdir(abs, { withFileTypes: true });
-        const items = ents
-          .map((e) => ({ name: e.name, type: e.isDirectory() ? "dir" : "file" }))
-          .sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === "dir" ? -1 : 1));
-        return sendJson(res, 200, { path: rel, items });
-      }
-
-      if (req.method === "GET" && u.pathname === "/api/read") {
-        const rel = String(u.searchParams.get("path") || "").trim();
-        if (!rel) return sendJson(res, 400, { error: "Missing path" });
-        const abs = path.join(REPO_ROOT, rel);
-        assertWithinMemories(abs);
-        const content = await readFileUtf8(abs);
-        return sendJson(res, 200, { path: rel, content });
+      if (u.pathname.startsWith("/api/")) {
+        const bodyText = req.method === "POST" ? await readRequestBody(req) : "";
+        const out = await apiHandleRequest({
+          method: req.method,
+          pathname: u.pathname,
+          searchParams: u.searchParams,
+          headers: req.headers,
+          bodyText,
+        });
+        return sendJson(res, out.statusCode, out.json);
       }
 
       return sendJson(res, 404, { error: "Not found" });
@@ -1739,604 +2194,6 @@ async function cmdServeWatch(args) {
     process.exit(0);
   });
 }
-
-function renderHtml() {
-  // Single-file UI. Bootstrap via CDN.
-  return `<!doctype html>
-<html lang=\"en\">
-  <head>
-    <meta charset=\"utf-8\"/>
-    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/>
-    <title>Enkidu</title>
-    <link href=\"https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css\" rel=\"stylesheet\">
-    <style>
-      :root {
-        /* Gilgamesh palette: lapis lazuli + gold + sand */
-        --enkidu-lapis: #0b3b7a;
-        --enkidu-lapis2: #102a4c;
-        --enkidu-gold: #c9a227;
-        --enkidu-sand: #f3ead8;
-        --enkidu-ink: #101828;
-      }
-
-      body.bg-light {
-        color: var(--enkidu-ink);
-        background:
-          radial-gradient(1200px 600px at 10% 0%, rgba(201,162,39,0.20), transparent 60%),
-          radial-gradient(900px 500px at 90% 10%, rgba(11,59,122,0.25), transparent 55%),
-          linear-gradient(180deg, rgba(243,234,216,0.95), rgba(243,234,216,0.80));
-      }
-
-      /* Subtle cuneiform-style pattern (inline SVG) */
-      body.bg-light::before {
-        content: '';
-        position: fixed;
-        inset: 0;
-        pointer-events: none;
-        opacity: 0.08;
-        background-image: url(\"data:image/svg+xml,%3Csvg%20xmlns%3D'http%3A//www.w3.org/2000/svg'%20width%3D'220'%20height%3D'220'%20viewBox%3D'0%200%20220%20220'%3E%3Crect%20width%3D'220'%20height%3D'220'%20fill%3D'none'/%3E%3Cg%20fill%3D'%230b3b7a'%3E%3Crect%20x%3D'18'%20y%3D'22'%20width%3D'10'%20height%3D'42'%20rx%3D'2'/%3E%3Crect%20x%3D'34'%20y%3D'34'%20width%3D'34'%20height%3D'10'%20rx%3D'2'/%3E%3Crect%20x%3D'74'%20y%3D'22'%20width%3D'10'%20height%3D'42'%20rx%3D'2'/%3E%3Crect%20x%3D'96'%20y%3D'56'%20width%3D'52'%20height%3D'10'%20rx%3D'2'/%3E%3Crect%20x%3D'148'%20y%3D'30'%20width%3D'10'%20height%3D'36'%20rx%3D'2'/%3E%3Crect%20x%3D'26'%20y%3D'96'%20width%3D'58'%20height%3D'10'%20rx%3D'2'/%3E%3Crect%20x%3D'26'%20y%3D'114'%20width%3D'10'%20height%3D'52'%20rx%3D'2'/%3E%3Crect%20x%3D'52'%20y%3D'138'%20width%3D'66'%20height%3D'10'%20rx%3D'2'/%3E%3Crect%20x%3D'134'%20y%3D'108'%20width%3D'10'%20height%3D'62'%20rx%3D'2'/%3E%3Crect%20x%3D'150'%20y%3D'122'%20width%3D'44'%20height%3D'10'%20rx%3D'2'/%3E%3Crect%20x%3D'166'%20y%3D'150'%20width%3D'28'%20height%3D'10'%20rx%3D'2'/%3E%3C/g%3E%3C/svg%3E\");
-        background-repeat: no-repeat;
-        background-position: 75% 18%;
-        background-size: 560px 560px;
-      }
-
-      /* Basic markdown styling inside chat bubbles */
-      #chatHistory code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace; }
-      #chatHistory pre { background: rgba(0,0,0,0.05); padding: .75rem; border-radius: .5rem; overflow-x: auto; }
-      #chatHistory p:last-child { margin-bottom: 0 !important; }
-      .enkidu-typingDots span { display: inline-block; width: .5rem; text-align: center; animation: enkiduDotPulse 1.2s infinite; }
-      .enkidu-typingDots span:nth-child(2) { animation-delay: .15s; }
-      .enkidu-typingDots span:nth-child(3) { animation-delay: .30s; }
-      @keyframes enkiduDotPulse { 0%, 80%, 100% { opacity: .2; } 40% { opacity: 1; } }
-
-      .enkidu-hero {
-        background: linear-gradient(135deg, rgba(11,59,122,0.92), rgba(16,42,76,0.92));
-        border: 1px solid rgba(255,255,255,0.10);
-      }
-
-      .enkidu-hero .enkidu-title {
-        letter-spacing: 0.4px;
-      }
-
-      .enkidu-hero .enkidu-subtitle {
-        color: rgba(255,255,255,0.80);
-      }
-
-      .card.shadow-sm {
-        border: 1px solid rgba(16,42,76,0.10);
-      }
-
-      .btn-primary {
-        background-color: var(--enkidu-lapis);
-        border-color: rgba(16,42,76,0.30);
-      }
-      .btn-primary:hover { background-color: #09407f; }
-
-      .btn-warning {
-        background-color: var(--enkidu-gold);
-        border-color: rgba(0,0,0,0.10);
-        color: #1b1405;
-      }
-      .btn-warning:hover { filter: brightness(0.98); }
-    </style>
-  </head>
-  <body class=\"bg-light\">
-    <div class=\"container py-4\">
-      <div class=\"enkidu-hero rounded-4 shadow-sm p-3 p-md-4 mb-3\">
-        <div class=\"d-flex align-items-center justify-content-between\">
-          <div>
-            <div class=\"h3 m-0 text-white enkidu-title\">Enkidu</div>
-            <div class=\"small enkidu-subtitle\">Gilgamesh-flavoured, local-first assistant</div>
-          </div>
-          <div class=\"small enkidu-subtitle\">UI</div>
-        </div>
-      </div>
-
-      <div class=\"row g-3\">
-        <div class=\"col-12 col-lg-6\">
-          <div class=\"card shadow-sm\">
-            <div class=\"card-body\">
-              <h2 class=\"h5\">Work</h2>
-              <div class=\"row g-2 align-items-end mb-2\">
-                <div class=\"col-12 col-sm-6\">
-                  <label class=\"form-label small text-muted\">Model</label>
-                  <div id=\"modelGroup\" class=\"btn-group w-100\" role=\"group\" aria-label=\"Model\">
-                    <input type=\"radio\" class=\"btn-check\" name=\"modelRadio\" id=\"m52\" autocomplete=\"off\" value=\"gpt-5.2\">
-                    <label class=\"btn btn-outline-primary\" for=\"m52\" title=\"gpt-5.2 — $14.00/1M output\">5.2</label>
-
-                    <input type=\"radio\" class=\"btn-check\" name=\"modelRadio\" id=\"m5mini\" autocomplete=\"off\" value=\"gpt-5-mini\">
-                    <label class=\"btn btn-outline-primary\" for=\"m5mini\" title=\"gpt-5-mini — $2.00/1M output\">5-mini</label>
-
-                    <input type=\"radio\" class=\"btn-check\" name=\"modelRadio\" id=\"m5nano\" autocomplete=\"off\" value=\"gpt-5-nano\">
-                    <label class=\"btn btn-outline-primary\" for=\"m5nano\" title=\"gpt-5-nano — $0.40/1M output\">5-nano</label>
-
-                    <input type=\"radio\" class=\"btn-check\" name=\"modelRadio\" id=\"m4omini\" autocomplete=\"off\" value=\"gpt-4o-mini\">
-                    <label class=\"btn btn-outline-primary\" for=\"m4omini\" title=\"gpt-4o-mini — $0.60/1M output\">4o-mini</label>
-                  </div>
-                </div>
-                <div class=\"col-12 col-sm-6\"></div>
-              </div>
-              <div id=\"chatHistory\" class=\"border rounded bg-white p-2 mb-2\" style=\"height: 420px; overflow-y: auto;\"></div>
-              <div class=\"mb-2\">
-                <textarea id=\"workPrompt\" class=\"form-control\" rows=\"3\" placeholder=\"Message (Enter to send, Shift+Enter for newline)...\"></textarea>
-              </div>
-              <div class=\"d-flex gap-2 flex-wrap\">
-                <button id=\"workBtn\" class=\"btn btn-primary\">Run</button>
-                <button id=\"workBtnNow\" class=\"btn btn-outline-primary\">RunNow</button>
-                <button id=\"clearHistoryBtn\" class=\"btn btn-outline-secondary\">Start over</button>
-              </div>
-              <div id=\"workStatus\" class=\"mt-2 small text-muted\"></div>
-              <div id=\"autoCaptureStatus\" class=\"small text-muted\"></div>
-              <details class=\"mt-2\">
-                <summary class=\"small text-muted\">Used memories</summary>
-                <div id=\"usedMemories\" class=\"small mt-1\"></div>
-              </details>
-              <details class=\"mt-2\">
-                <summary class=\"small text-muted\">Used sources</summary>
-                <div id=\"usedSources\" class=\"small mt-1\"></div>
-              </details>
-            </div>
-          </div>
-        </div>
-
-        <div class=\"col-12\">
-          <div class=\"card shadow-sm\">
-            <div class=\"card-body\">
-              <h2 class=\"h5\">Sources (ingest)</h2>
-              <div class=\"small text-muted\">Pick a folder of markdown files; Enkidu will store verbatim sources and create curated memory notes.</div>
-              <div class=\"row g-2 align-items-end mt-1\">
-                <div class=\"col-12 col-lg-8\">
-                  <input id=\"sourcesFolder\" class=\"form-control\" type=\"file\" webkitdirectory multiple />
-                </div>
-                <div class=\"col-12 col-lg-4\">
-                  <div class=\"d-flex gap-2\">
-                    <button id=\"ingestSourcesBtn\" class=\"btn btn-outline-primary w-100\">Ingest</button>
-                    <button id=\"clearSourcesBtn\" class=\"btn btn-outline-secondary w-100\">Clear</button>
-                  </div>
-                </div>
-              </div>
-              <div id=\"sourcesStatus\" class=\"small text-muted mt-2\"></div>
-            </div>
-          </div>
-        </div>
-
-        <div class=\"col-12\">
-          <div class=\"card shadow-sm\">
-            <div class=\"card-body\">
-              <h2 class=\"h5\">Dream + Diary</h2>
-              <div class=\"d-flex gap-2 flex-wrap\">
-                <button id=\"dreamBtn\" class=\"btn btn-warning\">Run Dream</button>
-                <button id=\"refreshDiaryBtn\" class=\"btn btn-outline-secondary\">Refresh diary list</button>
-              </div>
-              <div class=\"row g-2 mt-2\">
-                <div class=\"col-12 col-lg-4\">
-                  <div class=\"small text-muted mb-1\">Diary entries</div>
-                  <select id=\"diarySelect\" class=\"form-select\" size=\"8\"></select>
-                </div>
-                <div class=\"col-12 col-lg-8\">
-                  <div class=\"small text-muted mb-1\">Diary content</div>
-                  <pre id=\"diaryOut\" class=\"p-2 bg-body-tertiary border rounded\" style=\"white-space:pre-wrap; min-height: 12rem;\"></pre>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class=\"col-12\">
-          <div class=\"card shadow-sm\">
-            <div class=\"card-body\">
-              <h2 class=\"h5\">Memories browser</h2>
-              <div class=\"row g-2\">
-                <div class=\"col-12 col-lg-4\">
-                  <div class=\"small text-muted mb-1\">Path</div>
-                  <div class=\"input-group\">
-                    <input id=\"browsePath\" class=\"form-control\" value=\"memories\"/>
-                    <button id=\"browseBtn\" class=\"btn btn-outline-primary\">List</button>
-                  </div>
-                  <ul id=\"browseList\" class=\"list-group mt-2\"></ul>
-                </div>
-                <div class=\"col-12 col-lg-8\">
-                  <div class=\"small text-muted mb-1\">File content</div>
-                  <pre id=\"fileOut\" class=\"p-2 bg-body-tertiary border rounded\" style=\"white-space:pre-wrap; min-height: 12rem;\"></pre>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <script>
-      // Minimal, safe markdown renderer (escape first; render a small subset).
-      function escapeHtml(s) {
-        return String(s || '')
-          .replaceAll('&', '&amp;')
-          .replaceAll('<', '&lt;')
-          .replaceAll('>', '&gt;')
-          .replaceAll('"', '&quot;')
-          .replaceAll(\"'\", '&#39;');
-      }
-
-      function renderMarkdown(md) {
-        let s = escapeHtml(md);
-
-        // Fenced code blocks
-        const tick = String.fromCharCode(96); // avoids embedding a backtick character in the outer HTML template string
-        const fence = tick + tick + tick;
-        const fenceRe = new RegExp(fence + '([\\\\s\\\\S]*?)' + fence, 'g');
-        s = s.replace(fenceRe, (m, code) => {
-          return '<pre class=\"mb-0\"><code>' + code.replace(/^\\n|\\n$/g, '') + '</code></pre>';
-        });
-
-        // Inline code
-        const inlineCodeRe = new RegExp(tick + '([^' + tick + ']*)' + tick, 'g');
-        s = s.replace(inlineCodeRe, '<code>$1</code>');
-
-        // Bold **...**
-        s = s.replace(/\\*\\*([^*]+)\\*\\*/g, '<strong>$1</strong>');
-
-        // Italic *...*
-        s = s.replace(/(^|[^*])\\*([^*]+)\\*([^*]|$)/g, '$1<em>$2</em>$3');
-
-        // Links [text](url) - only allow http(s)
-        s = s.replace(/\\[([^\\]]+)\\]\\(([^)]+)\\)/g, (m, text, url) => {
-          const u = String(url || '').trim();
-          if (!/^https?:\\/\\//i.test(u)) return text;
-          return '<a href=\"' + u + '\" target=\"_blank\" rel=\"noopener noreferrer\">' + text + '</a>';
-        });
-
-        // Paragraphs / line breaks (avoid touching <pre> blocks)
-        const parts = s.split(/(<pre[\\s\\S]*?<\\/pre>)/g);
-        for (let i = 0; i < parts.length; i++) {
-          if (parts[i].startsWith('<pre')) continue;
-          parts[i] = parts[i]
-            .split(/\\n\\n+/)
-            .map(p => '<p class=\"mb-2\">' + p.replace(/\\n/g, '<br>') + '</p>')
-            .join('');
-        }
-        s = parts.join('');
-
-        return s;
-      }
-
-      async function postJson(url, obj) {
-        try {
-          const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(obj) });
-          const text = await r.text();
-          try { return JSON.parse(text); } catch { return { error: text || ('HTTP ' + r.status) }; }
-        } catch (e) {
-          return { error: (e && e.message) ? e.message : String(e) };
-        }
-      }
-      async function getJson(url) {
-        try {
-          const r = await fetch(url);
-          const text = await r.text();
-          try { return JSON.parse(text); } catch { return { error: text || ('HTTP ' + r.status) }; }
-        } catch (e) {
-          return { error: (e && e.message) ? e.message : String(e) };
-        }
-      }
-
-      const workBtn = document.getElementById('workBtn');
-      const workBtnNow = document.getElementById('workBtnNow');
-      const workPrompt = document.getElementById('workPrompt');
-      const clearHistoryBtn = document.getElementById('clearHistoryBtn');
-      const chatHistoryEl = document.getElementById('chatHistory');
-      const workStatus = document.getElementById('workStatus');
-      const usedMemoriesEl = document.getElementById('usedMemories');
-      const autoCaptureStatusEl = document.getElementById('autoCaptureStatus');
-      const usedSourcesEl = document.getElementById('usedSources');
-
-      const sourcesFolderEl = document.getElementById('sourcesFolder');
-      const ingestSourcesBtn = document.getElementById('ingestSourcesBtn');
-      const clearSourcesBtn = document.getElementById('clearSourcesBtn');
-      const sourcesStatusEl = document.getElementById('sourcesStatus');
-
-      function selectedMdFiles() {
-        return Array.from(sourcesFolderEl.files || []).filter(f => {
-          const name = String(f.name || '');
-          const rel = String(f.webkitRelativePath || '');
-          if (name.startsWith('.')) return false;
-          if (rel.split('/').some(p => p.startsWith('.'))) return false;
-          return name.toLowerCase().endsWith('.md');
-        });
-      }
-
-      sourcesFolderEl.addEventListener('change', async () => {
-        const files = selectedMdFiles();
-        sourcesStatusEl.textContent = files.length ? ('Selected ' + files.length + ' .md file(s).') : '';
-      });
-
-      ingestSourcesBtn.onclick = async () => {
-        const files = selectedMdFiles();
-        if (!files.length) {
-          sourcesStatusEl.textContent = 'No .md files selected.';
-          return;
-        }
-
-        ingestSourcesBtn.disabled = true;
-        clearSourcesBtn.disabled = true;
-        sourcesStatusEl.textContent = 'Ingesting...';
-
-        const model = getSelectedModel();
-        let done = 0;
-        let createdMem = 0;
-        let createdSrc = 0;
-        const batchSize = 5;
-
-        try {
-          for (let i = 0; i < files.length; i += batchSize) {
-            const batch = files.slice(i, i + batchSize);
-            const payloadFiles = [];
-            for (const f of batch) {
-              const rel = f.webkitRelativePath || f.name;
-              payloadFiles.push({ path: rel, content: await f.text() });
-            }
-            const resp = await postJson('/api/sources/ingest', { model, files: payloadFiles });
-            if (resp && resp.error) {
-              sourcesStatusEl.textContent = 'Error: ' + resp.error;
-              return;
-            }
-            createdMem += (resp.createdMemories || []).length;
-            createdSrc += (resp.createdSources || []).length;
-            done += batch.length;
-            sourcesStatusEl.textContent = 'Ingested ' + done + '/' + files.length + ' files. Created ' + createdMem + ' memory notes.';
-          }
-          sourcesStatusEl.textContent = 'Done. Created ' + createdMem + ' memory notes from ' + createdSrc + ' source file(s).';
-        } finally {
-          ingestSourcesBtn.disabled = false;
-          clearSourcesBtn.disabled = false;
-        }
-      };
-
-      clearSourcesBtn.onclick = () => {
-        sourcesFolderEl.value = '';
-        sourcesStatusEl.textContent = '';
-      };
-
-      // Persist model selection (radio buttons).
-      const MODEL_DEFAULT = 'gpt-5-mini';
-      function getSelectedModel() {
-        const el = document.querySelector('input[name=\"modelRadio\"]:checked');
-        return (el && el.value) ? el.value : MODEL_DEFAULT;
-      }
-      function setSelectedModel(id) {
-        const el = document.querySelector('input[name=\"modelRadio\"][value=\"' + id + '\"]');
-        if (el) el.checked = true;
-      }
-      setSelectedModel(localStorage.getItem('enkidu.model') || MODEL_DEFAULT);
-      document.querySelectorAll('input[name=\"modelRadio\"]').forEach(el => {
-        el.addEventListener('change', () => localStorage.setItem('enkidu.model', getSelectedModel()));
-      });
-
-      // Chat history (browser-local).
-      function loadHistory() {
-        try { return JSON.parse(localStorage.getItem('enkidu.chatHistory') || '[]'); } catch { return []; }
-      }
-      function saveHistory(h) {
-        localStorage.setItem('enkidu.chatHistory', JSON.stringify(h));
-      }
-      function renderHistory() {
-        const h = loadHistory();
-        chatHistoryEl.innerHTML = '';
-        for (const m of h) {
-          const row = document.createElement('div');
-          row.className = 'd-flex mb-2';
-
-          const bubble = document.createElement('div');
-          bubble.className = 'p-2 border rounded';
-          bubble.style.whiteSpace = 'pre-wrap';
-          bubble.style.maxWidth = '85%';
-          bubble.innerHTML = renderMarkdown(m.content);
-
-          if (m.role === 'user') {
-            row.className += ' justify-content-end';
-            bubble.className += ' bg-primary-subtle';
-          } else {
-            row.className += ' justify-content-start';
-            bubble.className += ' bg-body-tertiary';
-          }
-
-          row.appendChild(bubble);
-          chatHistoryEl.appendChild(row);
-        }
-        chatHistoryEl.scrollTop = chatHistoryEl.scrollHeight;
-      }
-
-      function addTypingIndicator(label) {
-        const row = document.createElement('div');
-        row.className = 'd-flex mb-2 justify-content-start';
-        row.id = 'typingIndicatorRow';
-
-        const bubble = document.createElement('div');
-        bubble.className = 'p-2 border rounded bg-body-tertiary';
-        bubble.style.whiteSpace = 'pre-wrap';
-        bubble.style.maxWidth = '85%';
-        const txt = (label || 'Thinking').toString();
-        bubble.innerHTML = escapeHtml(txt) + ' <span class=\"enkidu-typingDots\"><span>.</span><span>.</span><span>.</span></span>';
-
-        row.appendChild(bubble);
-        chatHistoryEl.appendChild(row);
-        chatHistoryEl.scrollTop = chatHistoryEl.scrollHeight;
-      }
-
-      function removeTypingIndicator() {
-        const el = document.getElementById('typingIndicatorRow');
-        if (el) el.remove();
-      }
-
-      // Enter runs Work (Shift+Enter keeps newline).
-      workPrompt.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' && !e.shiftKey) {
-          e.preventDefault();
-          workBtn.click();
-        }
-      });
-
-      async function doWork(runNow) {
-        workStatus.textContent = 'Working...';
-        workBtn.disabled = true;
-        workBtnNow.disabled = true;
-        const label = runNow ? 'Thinking (fast)' : 'Thinking (retrieve + answer)';
-        addTypingIndicator(label);
-        const model = getSelectedModel();
-        const history = loadHistory();
-        if (runNow) {
-          usedMemoriesEl.textContent = '(skipped: RunNow)';
-          usedSourcesEl.textContent = '(skipped: RunNow)';
-        } else {
-          usedMemoriesEl.textContent = '(retrieving...)';
-          usedSourcesEl.textContent = '(retrieving...)';
-        }
-        const sources = [];
-        let resp = null;
-        try {
-          resp = await postJson('/api/work', { prompt: workPrompt.value, model, history, sources, runNow: !!runNow });
-        } finally {
-          workBtn.disabled = false;
-          workBtnNow.disabled = false;
-        }
-        workStatus.textContent = resp && resp.error ? ('Error: ' + resp.error) : '';
-        if (resp.capturePath) {
-          autoCaptureStatusEl.textContent = 'Captured: ' + resp.capturePath;
-        } else {
-          autoCaptureStatusEl.textContent = '';
-        }
-
-        // Show which memories were included for retrieval.
-        if (!runNow && resp && Array.isArray(resp.usedMemories)) {
-          const ms = resp.usedMemories;
-          if (!ms.length) {
-            usedMemoriesEl.textContent = '(none)';
-          } else {
-            usedMemoriesEl.innerHTML = ms
-              .map(m => '<div><code>' + escapeHtml(m.path || '') + '</code> — ' + escapeHtml(m.title || '') + ' <span class=\"text-muted\">(imp ' + escapeHtml(String(m.importance ?? 0)) + ')</span></div>')
-              .join('');
-          }
-        }
-        // Show which sources were included (server-side retrieval).
-        if (!runNow && resp && Array.isArray(resp.usedSources)) {
-          const ss = resp.usedSources;
-          if (!ss.length) usedSourcesEl.textContent = '(none)';
-          else usedSourcesEl.innerHTML = ss.map(s => '<div><code>' + escapeHtml(s.path || '') + '</code></div>').join('');
-        }
-
-        if (resp && resp.error && !resp.answer) {
-          // Show server error inline in chat so it can't be missed.
-          const h = loadHistory();
-          h.push({ role: 'assistant', content: 'Error:\\n' + String(resp.error) });
-          saveHistory(h.slice(-20));
-          renderHistory();
-          removeTypingIndicator();
-          return;
-        }
-
-        if (resp.answer) {
-          // Update retrieval panels first, then append the assistant message.
-          const h = loadHistory();
-          h.push({ role: 'user', content: workPrompt.value });
-          h.push({ role: 'assistant', content: resp.answer });
-          saveHistory(h.slice(-20));
-          renderHistory();
-          workPrompt.value = '';
-        }
-
-        removeTypingIndicator();
-      }
-
-      workBtn.onclick = async () => doWork(false);
-      workBtnNow.onclick = async () => doWork(true);
-
-      clearHistoryBtn.onclick = () => {
-        saveHistory([]);
-        renderHistory();
-        workPrompt.value = '';
-        workStatus.textContent = '';
-        autoCaptureStatusEl.textContent = '';
-        usedMemoriesEl.textContent = '';
-        usedSourcesEl.textContent = '';
-      };
-
-      const dreamBtn = document.getElementById('dreamBtn');
-      const refreshDiaryBtn = document.getElementById('refreshDiaryBtn');
-      const diarySelect = document.getElementById('diarySelect');
-      const diaryOut = document.getElementById('diaryOut');
-
-      async function refreshDiary() {
-        const resp = await getJson('/api/diary/list');
-        diarySelect.innerHTML = '';
-        for (const f of (resp.files || [])) {
-          const opt = document.createElement('option');
-          opt.value = f;
-          opt.textContent = f.split('/').slice(-1)[0];
-          diarySelect.appendChild(opt);
-        }
-        diaryOut.textContent = '';
-      }
-
-      diarySelect.onchange = async () => {
-        const p = diarySelect.value;
-        if (!p) return;
-        const resp = await getJson('/api/read?path=' + encodeURIComponent(p));
-        diaryOut.textContent = resp.content || resp.error || 'Error';
-      };
-
-      dreamBtn.onclick = async () => {
-        diaryOut.textContent = 'Dreaming...';
-        const resp = await postJson('/api/dream', { model: getSelectedModel() });
-        diaryOut.textContent = resp.ok ? 'Dream complete. Refresh diary list.' : (resp.error || 'Error');
-      };
-
-      refreshDiaryBtn.onclick = refreshDiary;
-
-      const browseBtn = document.getElementById('browseBtn');
-      const browsePath = document.getElementById('browsePath');
-      const browseList = document.getElementById('browseList');
-      const fileOut = document.getElementById('fileOut');
-
-      browseBtn.onclick = async () => {
-        const p = browsePath.value || 'memories';
-        const resp = await getJson('/api/list?path=' + encodeURIComponent(p));
-        browseList.innerHTML = '';
-        fileOut.textContent = '';
-        if (resp.error) {
-          fileOut.textContent = resp.error;
-          return;
-        }
-        for (const it of (resp.items || [])) {
-          const li = document.createElement('li');
-          li.className = 'list-group-item d-flex justify-content-between align-items-center';
-          li.textContent = it.name;
-          const badge = document.createElement('span');
-          badge.className = 'badge text-bg-secondary';
-          badge.textContent = it.type;
-          li.appendChild(badge);
-
-          li.onclick = async () => {
-            const next = (p.endsWith('/') ? p.slice(0, -1) : p) + '/' + it.name;
-            if (it.type === 'dir') {
-              browsePath.value = next;
-              browseBtn.click();
-            } else {
-              const r = await getJson('/api/read?path=' + encodeURIComponent(next));
-              fileOut.textContent = r.content || r.error || 'Error';
-            }
-          };
-
-          browseList.appendChild(li);
-        }
-      };
-
-      // Initial load
-      renderHistory();
-      refreshDiary();
-      browseBtn.click();
-    </script>
-  </body>
-</html>`;
-}
-
 // -----------------------------
 // Main
 // -----------------------------
@@ -2386,6 +2243,10 @@ Env:
 `);
 }
 
-await main();
+// Important: allow importing this file from Netlify Functions without running the CLI.
+const isDirectRun = import.meta.url === pathToFileURL(process.argv[1] || "").href;
+if (isDirectRun) {
+  await main();
+}
 
 

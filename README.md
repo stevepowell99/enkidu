@@ -10,17 +10,20 @@ Single-file Node app (`enkidu.js`) + file-based memory store (`memories/`) + edi
   - **work**: answer requests using system instruction + work instruction + retrieved context
   - **dream**: reorganise/update memory + (optionally) update instructions
   - **restructure**: improve the instruction/memory architecture to get better context selection
-- **Future (not implemented yet)**: background autonomy, Gmail/Drive/tools, cloud hosting (Netlify+Supabase style)
+- **Future (not implemented yet)**: background autonomy, Gmail/Drive/tools
 
 ## Requirements
 - Node.js 18+
 
 ## Environment
-Put these in `.env` (or real env vars):
+Put these in `.env` (or real env vars). See `env.example`.
 - `OPENAI_API_KEY` (required)
 - `OPENAI_BASE_URL` (optional, default `https://api.openai.com/v1`)
 - `OPENAI_MODEL` (optional, default `gpt-4o-mini`)
 - `OPENAI_EMBEDDING_MODEL` (optional, default `text-embedding-3-small`)
+- `ENKIDU_STORAGE` (`local` default; `supabase` to use Supabase SQL)
+- `SUPABASE_URL` (required if `ENKIDU_STORAGE=supabase`)
+- `SUPABASE_SERVICE_ROLE_KEY` (required if `ENKIDU_STORAGE=supabase`; keep server-side only)
 
 ## Commands
 - `node enkidu.js serve --port 3000` (UI)
@@ -30,18 +33,45 @@ Put these in `.env` (or real env vars):
 - `node enkidu.js dream --model gpt-5-mini` (autonomous memory re-org + diary; model optional)
 - `node enkidu.js embed` (rebuild/update memory embeddings cache; normally automatic)
 
+## Hosting (Netlify + Supabase) (git-push deploy)
+
+### Supabase setup
+- Create a Supabase project (Postgres).
+- In Supabase SQL editor, run `supabase/schema.sql`.
+
+### Netlify setup
+- Connect this repo in Netlify (deploys on git push).
+- `netlify.toml` is included:
+  - publishes `public/`
+  - routes `/api/*` to a Netlify Function (`netlify/functions/api.mjs`)
+- Set Netlify environment variables:
+  - `ENKIDU_STORAGE=supabase`
+  - `OPENAI_API_KEY=...`
+  - `SUPABASE_URL=...`
+  - `SUPABASE_SERVICE_ROLE_KEY=...`
+
+## Secrets / git safety
+- `.env` is already in `.gitignore` (do not commit it).
+- **Never expose** `SUPABASE_SERVICE_ROLE_KEY` to the browser; it must only exist in Netlify env vars (server-side).
+
 ## Core architecture (terse)
 
 ### Memory store (writable)
-- `memories/inbox|people|projects|howto/*.md`: curated memory notes
+- **Local mode (`ENKIDU_STORAGE=local`)**:
+  - `memories/inbox|people|projects|howto/*.md`: curated memory notes
   - front matter supports: `title`, `created`, `tags`, `importance: 0..3`, `source`, etc
-- `memories/sessions/recent.jsonl`: rolling session log (episodic memory)
-- `memories/diary/*.md`: dream diary entries
+  - `memories/sessions/recent.jsonl`: rolling session log (episodic memory)
+  - `memories/diary/*.md`: dream diary entries
+- **Supabase mode (`ENKIDU_STORAGE=supabase`)**:
+  - `memories` table: memory notes (stored as markdown strings + metadata)
+  - `session_events` table: session log
+  - `sources` table: verbatim sources (stored as markdown strings)
 
 ### Generated caches (gitignored)
-- `memories/_index.json`: index of memory notes (paths + metadata + preview + importance)
-- `memories/_embeddings.json`: embeddings cache for memory notes (hash + vector per note)
-- `memories/_source_embeddings.json`: embeddings cache for stored verbatim sources
+- (Local mode only)
+  - `memories/_index.json`: index of memory notes (paths + metadata + preview + importance)
+  - `memories/_embeddings.json`: embeddings cache for memory notes (hash + vector per note)
+  - `memories/_source_embeddings.json`: embeddings cache for stored verbatim sources
 
 ### Instructions (soft architecture)
 - `instructions/work.md`: system prompt for `work` (also defines `===WEB_FETCH===` + `===CAPTURE===`)
@@ -50,11 +80,12 @@ Put these in `.env` (or real env vars):
 
 ## Work pipeline (heuristic-first)
 1. **Heuristic router** decides whether to include recency and whether to do AI query expansion.
-2. **Recency** (if needed): include recent turns from `memories/sessions/recent.jsonl`.
+2. **Recency** (if needed): include recent turns from local `memories/sessions/recent.jsonl` or Supabase `session_events`.
 3. **Retrieval**:
-   - embeddings retrieval over `memories/` (weighted by `importance`)
+   - local mode: embeddings retrieval over `memories/` (weighted by `importance`)
+   - supabase mode: simple keyword retrieval from `memories` table (no pgvector yet)
    - optional AI query expansion for vague prompts
-4. **Sources retrieval** (if ingested): embeddings retrieval over `memories/sources/verbatim/`.
+4. **Sources retrieval** (if ingested): local mode only (embeddings over `memories/sources/verbatim/`).
    - default excerpt size: 4k chars
    - if prompt asks for “verbatim / quote / full text”: include up to 20k chars
 5. **Answer call** → response + `===CAPTURE=== ...` (auto-capture writes to inbox and updates embeddings)
@@ -64,7 +95,8 @@ UI shows:
 - “Used sources”
 
 ## Dream
-- Dream can modify only `memories/` and `instructions/`.
+- Local mode: Dream can modify only `memories/` and `instructions/`.
+- Supabase mode (hosted): Dream can modify only `memories/` (instructions are read-only in the deployed repo).
 - It cannot edit `enkidu.js` or the generated caches.
 - After dream edits, embeddings are refreshed incrementally (hash-based).
 
@@ -72,7 +104,10 @@ UI shows:
 UI “Sources (ingest)”:
 - select a folder of `.md` files (subfolders allowed)
 - click **Ingest**
-- server writes:
+- local mode server writes:
   - verbatim store: `memories/sources/verbatim/*.md` (read-only)
   - curated memory notes filed to `memories/{inbox,people,projects,howto}/`
   - source embeddings for later retrieval
+- supabase mode server writes:
+  - `sources` table rows (verbatim markdown)
+  - `memories` table rows (curated notes)
