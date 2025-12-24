@@ -1030,7 +1030,7 @@ function renderHtml() {
         let s = escapeHtml(md);
 
         // Fenced code blocks
-        const tick = String.fromCharCode(96); // avoids embedding ` in the outer HTML template string
+        const tick = String.fromCharCode(96); // avoids embedding a backtick character in the outer HTML template string
         const fence = tick + tick + tick;
         const fenceRe = new RegExp(fence + '([\\\\s\\\\S]*?)' + fence, 'g');
         s = s.replace(fenceRe, (m, code) => {
