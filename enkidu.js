@@ -643,10 +643,16 @@ async function workCore({ prompt, model, history, sources, runNow }) {
   const recentEvents = route.needRecency ? await loadRecentSessionEvents(30) : [];
 
   // Heuristic-first: expand only when prompt is vague.
-  const queries = route.needExpansion ? await expandQueriesWithAI(prompt, model) : [prompt];
+  // If expansion fails/returns empty, fall back to the original prompt.
+  const expanded = route.needExpansion ? await expandQueriesWithAI(prompt, model) : [];
+  const queries = expanded.length ? expanded : [prompt];
 
   // Semantic retrieval: embeddings if available, otherwise keyword fallback inside retrieveTopMemories().
-  const top = fast ? [] : (await retrieveTopMemoriesByEmbeddings(queries, 5)) ?? (await retrieveTopMemories(prompt, 5));
+  let top = [];
+  if (!fast) {
+    const topEmb = await retrieveTopMemoriesByEmbeddings(queries, 5);
+    top = topEmb && topEmb.length ? topEmb : await retrieveTopMemories(prompt, 5);
+  }
 
   const memChunks = top.map(({ entry, text }) => {
     return [
@@ -1130,7 +1136,9 @@ async function cmdServe(args) {
 
       return sendJson(res, 404, { error: "Not found" });
     } catch (err) {
-      return sendJson(res, 500, { error: String(err?.message || err) });
+      // Log full server-side error for debugging.
+      console.error(err);
+      return sendJson(res, 500, { error: String(err?.stack || err?.message || err) });
     }
   });
 
@@ -1665,6 +1673,15 @@ function renderHtml() {
           } else {
             usedSourcesEl.textContent = '(none)';
           }
+        }
+
+        if (resp && resp.error && !resp.answer) {
+          // Show server error inline in chat so it can't be missed.
+          const h = loadHistory();
+          h.push({ role: 'assistant', content: 'Error:\\n' + String(resp.error) });
+          saveHistory(h.slice(-20));
+          renderHistory();
+          return;
         }
 
         if (resp.answer) {
