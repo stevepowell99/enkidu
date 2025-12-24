@@ -634,9 +634,10 @@ function normaliseHistory(history) {
   return out.slice(-20);
 }
 
-async function workCore({ prompt, model, history, sources }) {
+async function workCore({ prompt, model, history, sources, runNow }) {
   const instruction = await readInstruction(WORK_INSTRUCTION_FILE);
-  const route = heuristicRoute(prompt);
+  const fast = Boolean(runNow);
+  const route = fast ? { needRecency: false, needExpansion: false } : heuristicRoute(prompt);
 
   // Recency (episodic memory): always available across sessions.
   const recentEvents = route.needRecency ? await loadRecentSessionEvents(30) : [];
@@ -645,7 +646,7 @@ async function workCore({ prompt, model, history, sources }) {
   const queries = route.needExpansion ? await expandQueriesWithAI(prompt, model) : [prompt];
 
   // Semantic retrieval: embeddings if available, otherwise keyword fallback inside retrieveTopMemories().
-  const top = (await retrieveTopMemoriesByEmbeddings(queries, 5)) ?? (await retrieveTopMemories(prompt, 5));
+  const top = fast ? [] : (await retrieveTopMemoriesByEmbeddings(queries, 5)) ?? (await retrieveTopMemories(prompt, 5));
 
   const memChunks = top.map(({ entry, text }) => {
     return [
@@ -664,7 +665,7 @@ async function workCore({ prompt, model, history, sources }) {
   if (memChunks.length) userParts.push("Relevant memories (may be incomplete):\n\n" + memChunks.join("\n\n"));
 
   // Optional read-only source excerpts (provided by UI; not stored server-side).
-  if (Array.isArray(sources) && sources.length) {
+  if (!fast && Array.isArray(sources) && sources.length) {
     const srcChunks = sources
       .slice(0, 5)
       .map((s) => {
@@ -1077,8 +1078,9 @@ async function cmdServe(args) {
         const model = String(data.model || "").trim();
         const history = data.history;
         const sources = data.sources;
+        const runNow = Boolean(data.runNow);
         if (!prompt) return sendJson(res, 400, { error: "Missing prompt" });
-        const { raw, usedMemories } = await workCore({ prompt, model, history, sources });
+        const { raw, usedMemories } = await workCore({ prompt, model, history, sources, runNow });
         const { answer, capture } = splitAnswerAndCapture(raw);
         const capturePath = await writeAutoCaptureToInbox(capture);
         await appendSessionEvent("user", prompt);
@@ -1316,6 +1318,7 @@ function renderHtml() {
               </div>
               <div class=\"d-flex gap-2 flex-wrap\">
                 <button id=\"workBtn\" class=\"btn btn-primary\">Run</button>
+                <button id=\"workBtnNow\" class=\"btn btn-outline-primary\">RunNow</button>
                 <button id=\"clearHistoryBtn\" class=\"btn btn-outline-secondary\">Start over</button>
               </div>
               <div id=\"workStatus\" class=\"mt-2 small text-muted\"></div>
@@ -1460,6 +1463,7 @@ function renderHtml() {
       }
 
       const workBtn = document.getElementById('workBtn');
+      const workBtnNow = document.getElementById('workBtnNow');
       const workPrompt = document.getElementById('workPrompt');
       const clearHistoryBtn = document.getElementById('clearHistoryBtn');
       const chatHistoryEl = document.getElementById('chatHistory');
@@ -1580,7 +1584,7 @@ function renderHtml() {
         chatHistoryEl.scrollTop = chatHistoryEl.scrollHeight;
       }
 
-      function addTypingIndicator() {
+      function addTypingIndicator(label) {
         const row = document.createElement('div');
         row.className = 'd-flex mb-2 justify-content-start';
         row.id = 'typingIndicatorRow';
@@ -1589,7 +1593,8 @@ function renderHtml() {
         bubble.className = 'p-2 border rounded bg-body-tertiary';
         bubble.style.whiteSpace = 'pre-wrap';
         bubble.style.maxWidth = '85%';
-        bubble.innerHTML = 'Typing <span class=\"enkidu-typingDots\"><span>.</span><span>.</span><span>.</span></span>';
+        const txt = (label || 'Thinking').toString();
+        bubble.innerHTML = escapeHtml(txt) + ' <span class=\"enkidu-typingDots\"><span>.</span><span>.</span><span>.</span></span>';
 
         row.appendChild(bubble);
         chatHistoryEl.appendChild(row);
@@ -1609,21 +1614,29 @@ function renderHtml() {
         }
       });
 
-      workBtn.onclick = async () => {
+      async function doWork(runNow) {
         workStatus.textContent = 'Working...';
         workBtn.disabled = true;
-        addTypingIndicator();
+        workBtnNow.disabled = true;
+        const label = runNow ? 'Thinking (fast)' : 'Thinking (retrieve + answer)';
+        addTypingIndicator(label);
         const model = getSelectedModel();
         const history = loadHistory();
-        usedMemoriesEl.textContent = '(retrieving...)';
-        usedSourcesEl.textContent = sourcesIndex.length ? '(retrieving...)' : '(none)';
-        const sources = retrieveTopSources(workPrompt.value, 3);
+        if (runNow) {
+          usedMemoriesEl.textContent = '(skipped: RunNow)';
+          usedSourcesEl.textContent = '(skipped: RunNow)';
+        } else {
+          usedMemoriesEl.textContent = '(retrieving...)';
+          usedSourcesEl.textContent = sourcesIndex.length ? '(retrieving...)' : '(none)';
+        }
+        const sources = runNow ? [] : retrieveTopSources(workPrompt.value, 3);
         let resp = null;
         try {
-          resp = await postJson('/api/work', { prompt: workPrompt.value, model, history, sources });
+          resp = await postJson('/api/work', { prompt: workPrompt.value, model, history, sources, runNow: !!runNow });
         } finally {
           removeTypingIndicator();
           workBtn.disabled = false;
+          workBtnNow.disabled = false;
         }
         workStatus.textContent = resp && resp.error ? ('Error: ' + resp.error) : '';
         if (resp.capturePath) {
@@ -1633,7 +1646,7 @@ function renderHtml() {
         }
 
         // Show which memories were included for retrieval.
-        if (resp && Array.isArray(resp.usedMemories)) {
+        if (!runNow && resp && Array.isArray(resp.usedMemories)) {
           const ms = resp.usedMemories;
           if (!ms.length) {
             usedMemoriesEl.textContent = '(none)';
@@ -1644,12 +1657,14 @@ function renderHtml() {
           }
         }
         // Show which sources were sent (client-side retrieval).
-        if (sources && sources.length) {
-          usedSourcesEl.innerHTML = sources
-            .map(s => '<div><code>' + escapeHtml(s.path || '') + '</code></div>')
-            .join('');
-        } else {
-          usedSourcesEl.textContent = '(none)';
+        if (!runNow) {
+          if (sources && sources.length) {
+            usedSourcesEl.innerHTML = sources
+              .map(s => '<div><code>' + escapeHtml(s.path || '') + '</code></div>')
+              .join('');
+          } else {
+            usedSourcesEl.textContent = '(none)';
+          }
         }
 
         if (resp.answer) {
@@ -1660,7 +1675,10 @@ function renderHtml() {
           renderHistory();
           workPrompt.value = '';
         }
-      };
+      }
+
+      workBtn.onclick = async () => doWork(false);
+      workBtnNow.onclick = async () => doWork(true);
 
       clearHistoryBtn.onclick = () => {
         saveHistory([]);
