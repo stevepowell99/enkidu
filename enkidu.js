@@ -1200,9 +1200,25 @@ function intersectionSize(aSet, bSet) {
 }
 
 function isPreferenceTagged(tags) {
+  // Soft / configurable: preference tags define the "small preferences slice" Work can always include.
+  // Default keeps behavior stable, but user can extend/override via ENKIDU_PREF_TAGS.
+  loadDotenvIfPresent();
+  const prefTags = String(process.env.ENKIDU_PREF_TAGS || "style,preference,habits")
+    .split(/[,;]/)
+    .map((t) => t.trim().toLowerCase())
+    .filter(Boolean);
+  const prefSet = new Set(prefTags);
+
   const ts = Array.isArray(tags) ? tags : [];
-  const lower = ts.map((t) => String(t || "").toLowerCase().trim());
-  return lower.includes("preference") || lower.includes("preferences") || lower.includes("style") || lower.includes("habits");
+  for (const t of ts) {
+    const k = String(t || "").toLowerCase().trim();
+    if (!k) continue;
+    if (prefSet.has(k)) return true;
+    // small convenience: allow singular/plural preference(s)
+    if (k === "preferences" && prefSet.has("preference")) return true;
+    if (k === "preference" && prefSet.has("preferences")) return true;
+  }
+  return false;
 }
 
 function extractWebFetchUrl(text) {

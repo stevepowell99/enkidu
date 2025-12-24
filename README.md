@@ -25,6 +25,7 @@ Put these in `.env` (or real env vars). See `env.example`.
 - `ENKIDU_EMBED_MAX_TOKENS` (optional, embedding input budget, default `7800`)
 - `ENKIDU_WORK_MEM_TOP` (optional, max memories included in Work, default `5`)
 - `ENKIDU_WORK_SRC_TOP` (optional, max sources included in Work, default `3`)
+- `ENKIDU_PREF_TAGS` (optional, comma-separated tags treated as “preferences slice”, default `style,preference,habits`)
 - `ENKIDU_STORAGE` (`local` default; `supabase` to use Supabase SQL)
 - `SUPABASE_URL` (required if `ENKIDU_STORAGE=supabase`)
 - `SUPABASE_SERVICE_ROLE_KEY` (required if `ENKIDU_STORAGE=supabase`; keep server-side only)
