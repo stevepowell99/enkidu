@@ -2,7 +2,7 @@
 title: "Learning preferences (language quizzes & study topics)"
 id: d5fdb419a6bddc883e540478
 created: 2025-12-24T16:46:38Z
-tags: [learning, preferences, languages, bosnian, english]
+tags: [learning, learning-preferences, languages, bosnian, english]
 importance: 2
 source_refs:
   - memories/learning/bosnian/20251224t161948z_request-5-question-bosnian-grammar-mcq-pade-i.md
