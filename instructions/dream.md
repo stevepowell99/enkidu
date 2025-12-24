@@ -52,4 +52,12 @@ you should consider updating `instructions/work.md` (and/or this file) to reflec
 
 Keep instruction changes small and explicit.
 
+## Global "preference slice" hygiene (important)
+Work includes a tiny always-on "preferences slice" based on specific tags (configured via `ENKIDU_PREF_TAGS`; defaults include `style,preference,habits`).
+
+During Dream, keep this slice clean:
+- Only tag a note with `preference` / `preferences` / `style` / `habits` if it is **globally applicable** across most prompts (e.g. response style, tone, formatting, general habits).
+- Do NOT tag domain-specific notes (e.g. language-learning, recipes, one project) as global preferences; instead use domain tags like `learning-preferences`, `recipes`, `work-habits`, etc.
+- If you find a domain-specific note incorrectly tagged as global preference, retag it (remove the global preference tags) so it doesn't hijack unrelated answers.
+
 
