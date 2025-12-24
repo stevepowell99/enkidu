@@ -74,6 +74,11 @@
         color: #1b1405;
       }
       .btn-warning:hover { filter: brightness(0.98); }
+
+      /* Simple collapsible tree */
+      .enkidu-tree-node { user-select: none; }
+      .enkidu-tree-toggle { display: inline-block; width: 1.25rem; text-align: center; cursor: pointer; }
+      .enkidu-tree-label { cursor: pointer; }
     </style>
   </head>
 
@@ -231,12 +236,8 @@
               <h2 class="h5">Memories browser</h2>
               <div class="row g-2">
                 <div class="col-12 col-lg-4">
-                  <div class="small text-muted mb-1">Path</div>
-                  <div class="input-group">
-                    <input id="browsePath" class="form-control" value="memories"/>
-                    <button id="browseBtn" class="btn btn-outline-primary">List</button>
-                  </div>
-                  <ul id="browseList" class="list-group mt-2"></ul>
+                  <div class="small text-muted mb-1">Tree</div>
+                  <div id="memTree" class="border rounded bg-white p-2" style="max-height: 420px; overflow:auto;"></div>
                 </div>
                 <div class="col-12 col-lg-8">
                   <div class="small text-muted mb-1">File content</div>
@@ -769,48 +770,123 @@
 
       refreshDiaryBtn.onclick = refreshDiary;
 
-      const browseBtn = document.getElementById('browseBtn');
-      const browsePath = document.getElementById('browsePath');
-      const browseList = document.getElementById('browseList');
+      const memTree = document.getElementById('memTree');
       const fileOut = document.getElementById('fileOut');
 
-      browseBtn.onclick = async () => {
-        const p = browsePath.value || 'memories';
-        const resp = await getJson('/api/list?path=' + encodeURIComponent(p));
-        browseList.innerHTML = '';
+      function joinPath(parent, name) {
+        const p = String(parent || '').replace(/\/+$/, '');
+        const n = String(name || '').replace(/^\/+/, '');
+        return p ? (p + '/' + n) : n;
+      }
+
+      function makeTreeRow({ name, type, fullPath, depth }) {
+        const row = document.createElement('div');
+        row.className = 'enkidu-tree-node d-flex align-items-center gap-1 py-1';
+        row.style.paddingLeft = (depth * 14) + 'px';
+
+        const toggle = document.createElement('span');
+        toggle.className = 'enkidu-tree-toggle text-muted';
+        toggle.textContent = (type === 'dir') ? '▸' : '';
+
+        const label = document.createElement('span');
+        label.className = 'enkidu-tree-label';
+        label.textContent = name;
+
+        const badge = document.createElement('span');
+        badge.className = 'badge text-bg-secondary ms-auto';
+        badge.textContent = type;
+
+        row.appendChild(toggle);
+        row.appendChild(label);
+        row.appendChild(badge);
+
+        const children = document.createElement('div');
+        children.style.display = 'none';
+
+        row.dataset.type = type;
+        row.dataset.path = fullPath;
+        row.dataset.depth = String(depth);
+        row.dataset.loaded = 'false';
+        row.dataset.expanded = 'false';
+
+        async function loadChildren() {
+          const p = row.dataset.path || 'memories';
+          const resp = await getJson('/api/list?path=' + encodeURIComponent(p));
+          if (resp && resp.error) {
+            const err = document.createElement('div');
+            err.className = 'small text-danger';
+            err.style.paddingLeft = ((depth + 1) * 14) + 'px';
+            err.textContent = resp.error;
+            children.innerHTML = '';
+            children.appendChild(err);
+            row.dataset.loaded = 'true';
+            return;
+          }
+          const items = Array.isArray(resp.items) ? resp.items : [];
+          children.innerHTML = '';
+          for (const it of items) {
+            const childPath = joinPath(p, it.name);
+            const child = makeTreeRow({ name: it.name, type: it.type, fullPath: childPath, depth: depth + 1 });
+            children.appendChild(child.container);
+          }
+          row.dataset.loaded = 'true';
+        }
+
+        async function expand() {
+          if (type !== 'dir') return;
+          row.dataset.expanded = 'true';
+          toggle.textContent = '▾';
+          if (row.dataset.loaded !== 'true') await loadChildren();
+          children.style.display = '';
+        }
+
+        function collapse() {
+          if (type !== 'dir') return;
+          row.dataset.expanded = 'false';
+          toggle.textContent = '▸';
+          children.style.display = 'none';
+        }
+
+        async function toggleDir() {
+          if (type !== 'dir') return;
+          if (row.dataset.expanded === 'true') collapse();
+          else await expand();
+        }
+
+        toggle.onclick = async (e) => { e.stopPropagation(); await toggleDir(); };
+        label.onclick = async (e) => {
+          e.stopPropagation();
+          if (type === 'dir') {
+            await toggleDir();
+            return;
+          }
+          const r = await getJson('/api/read?path=' + encodeURIComponent(fullPath));
+          fileOut.textContent = r.content || r.error || 'Error';
+        };
+
+        return { container: document.createElement('div'), row, children };
+      }
+
+      function appendTreeRow(parentEl, rowObj) {
+        rowObj.container.appendChild(rowObj.row);
+        rowObj.container.appendChild(rowObj.children);
+        parentEl.appendChild(rowObj.container);
+      }
+
+      async function loadMemoriesTree() {
+        memTree.innerHTML = '';
         fileOut.textContent = '';
-        if (resp.error) {
-          fileOut.textContent = resp.error;
-          return;
-        }
-        for (const it of (resp.items || [])) {
-          const li = document.createElement('li');
-          li.className = 'list-group-item d-flex justify-content-between align-items-center';
-          li.textContent = it.name;
-          const badge = document.createElement('span');
-          badge.className = 'badge text-bg-secondary';
-          badge.textContent = it.type;
-          li.appendChild(badge);
 
-          li.onclick = async () => {
-            const next = (p.endsWith('/') ? p.slice(0, -1) : p) + '/' + it.name;
-            if (it.type === 'dir') {
-              browsePath.value = next;
-              browseBtn.click();
-            } else {
-              const r = await getJson('/api/read?path=' + encodeURIComponent(next));
-              fileOut.textContent = r.content || r.error || 'Error';
-            }
-          };
-
-          browseList.appendChild(li);
-        }
-      };
+        const root = makeTreeRow({ name: 'memories', type: 'dir', fullPath: 'memories', depth: 0 });
+        appendTreeRow(memTree, root);
+        // auto-expand root
+        root.row.querySelector('.enkidu-tree-toggle').click();
+      }
 
       // Initial load
       renderHistory();
       refreshDiary();
-      browseBtn.click();
+      loadMemoriesTree();
     </script>
   </body>
 </html>
