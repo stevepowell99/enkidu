@@ -663,7 +663,7 @@
 
           diaryOut.textContent += '\nDream: executing (reading + applying ops + writing diary)...';
           startTicker(diaryOut.textContent);
-          const exec = await postJson('/api/dream/execute', { planToken: plan.planToken });
+          const exec = await postJson('/api/dream/execute', { planToken: plan.planToken, model: getSelectedModel(), wantRead: wr });
           if (exec && exec.error) {
             diaryOut.textContent = exec.error || 'Error';
             return;

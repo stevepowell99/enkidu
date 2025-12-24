@@ -2536,14 +2536,95 @@ export async function apiHandleRequest({ method, pathname, searchParams, headers
       : parseFormUrlEncoded(bodyText);
     const planToken = String(data.planToken || "").trim();
     if (!planToken) return { statusCode: 400, json: { error: "Missing planToken" } };
+    const model = String(data.model || "").trim();
+    const wantReadClient = Array.isArray(data.wantRead) ? data.wantRead : [];
 
     pruneDreamPlanCache();
     const hit = DREAM_PLAN_CACHE.get(planToken);
-    if (!hit || !hit.plan) return { statusCode: 400, json: { error: "Unknown/expired planToken" } };
+    if (!hit || !hit.plan) {
+      // Cache miss recovery: server may have restarted between plan and execute (watch mode).
+      // Rebuild a minimal plan from current index + the client-provided wantRead list.
+      if (!model) return { statusCode: 400, json: { error: "Unknown/expired planToken (and missing model for recovery)" } };
+
+      const instruction = await readInstruction(DREAM_INSTRUCTION_FILE);
+      const DREAM_CATALOG_MAX = Math.max(200, Math.min(5000, Number(process.env.ENKIDU_DREAM_CATALOG_MAX || 2000)));
+      const DREAM_READ_MAX = Math.max(10, Math.min(120, Number(process.env.ENKIDU_DREAM_READ_MAX || 40)));
+
+      const idx = await loadIndex();
+      const entries = idx.entries || [];
+      const catalog = [];
+      for (const e of entries.slice(0, DREAM_CATALOG_MAX)) {
+        const rel = String(e?.path || "").replaceAll("\\", "/");
+        if (!rel) continue;
+        if (!rel.toLowerCase().endsWith(".md")) continue;
+        catalog.push({
+          path: rel,
+          title: e.title || "",
+          tags: e.tags || [],
+          importance: Number.isFinite(Number(e.importance)) ? Number(e.importance) : 0,
+          created: e.created || "",
+          updated: e.updated || "",
+          preview: e.preview || "",
+        });
+      }
+
+      let duplicate_report = null;
+      try {
+        const emb = await loadEmbeddingsCache();
+        if (emb && emb.items) duplicate_report = buildDuplicateReport({ entries, embeddingsCache: emb });
+      } catch {
+        duplicate_report = null;
+      }
+
+      const instructionFiles = [];
+      for (const rel of ["instructions/work.md", "instructions/dream.md"]) {
+        const abs = path.join(REPO_ROOT, rel);
+        assertWithinWritableRoots(abs);
+        if (!fs.existsSync(abs)) continue;
+        const content = await readFileUtf8(abs);
+        instructionFiles.push({ path: rel, content });
+      }
+
+      // Validate wantRead list from client.
+      const wantRead = [];
+      const seen = new Set();
+      for (const pth of wantReadClient) {
+        if (wantRead.length >= DREAM_READ_MAX) break;
+        const rel = String(pth || "").replaceAll("\\", "/").trim();
+        if (!rel) continue;
+        if (seen.has(rel)) continue;
+        if (!(rel.toLowerCase().startsWith("memories/") || rel.toLowerCase().startsWith("instructions/"))) continue;
+        if (rel.toLowerCase().startsWith("memories/sources/verbatim/")) continue;
+        const abs = path.join(REPO_ROOT, rel);
+        assertWithinWritableRoots(abs);
+        try {
+          assertNotProtectedWritable(abs);
+        } catch {
+          continue;
+        }
+        if (!fs.existsSync(abs)) continue;
+        seen.add(rel);
+        wantRead.push(rel);
+      }
+
+      const recoveredPlan = {
+        instruction,
+        model,
+        entriesCount: entries.length,
+        catalog,
+        duplicate_report,
+        instructionFiles,
+        wantRead,
+        DREAM_READ_MAX,
+      };
+
+      const result = await dreamExecuteFromPlan(recoveredPlan);
+      return { statusCode: 200, json: { ok: true, recoveredFromCacheMiss: true, ...result } };
+    }
 
     const result = await dreamExecuteFromPlan(hit.plan);
     DREAM_PLAN_CACHE.delete(planToken);
-    return { statusCode: 200, json: { ok: true, ...result } };
+    return { statusCode: 200, json: { ok: true, recoveredFromCacheMiss: false, ...result } };
   }
 
   if (m === "POST" && p === "/api/work/plan") {
