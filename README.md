@@ -1,51 +1,68 @@
-﻿# Enkidu (Node.js MVP)
+﻿# Enkidu (local-first assistant)
 
-Local-first file-based personal assistant (CLI + tiny Bootstrap UI).
+Single-file Node app (`enkidu.js`) + file-based memory store (`memories/`) + editable prompts (`instructions/`).
 
 ## Requirements
-- Node.js **18+** (uses built-in `fetch`)
+- Node.js 18+
 
-## Setup
-
+## Environment
 Put these in `.env` (or real env vars):
 - `OPENAI_API_KEY` (required)
-- `OPENAI_MODEL` (optional, default: `gpt-4o-mini`)
-- `OPENAI_BASE_URL` (optional, default: `https://api.openai.com/v1`)
+- `OPENAI_BASE_URL` (optional, default `https://api.openai.com/v1`)
+- `OPENAI_MODEL` (optional, default `gpt-4o-mini`)
+- `OPENAI_EMBEDDING_MODEL` (optional, default `text-embedding-3-small`)
 
-UI model dropdown shows output prices (per 1M tokens) next to model names.
+## Commands
+- `node enkidu.js serve --port 3000` (UI)
+- `npm run serve:watch` (UI dev restart; watches `enkidu.js` + `instructions/*.md`)
+- `node enkidu.js work "..."` (CLI work)
+- `node enkidu.js capture --title "..." --tags "a,b" --text "..."` (manual memory note)
+- `node enkidu.js dream --model gpt-5-mini` (autonomous memory re-org + diary; model optional)
+- `node enkidu.js embed` (rebuild/update memory embeddings cache; normally automatic)
 
-## CLI commands
+## Core architecture (terse)
 
-- Init folders + index:
-  - `node enkidu.js init`
+### Memory store (writable)
+- `memories/inbox|people|projects|howto/*.md`: curated memory notes
+  - front matter supports: `title`, `created`, `tags`, `importance: 0..3`, `source`, etc
+- `memories/sessions/recent.jsonl`: rolling session log (episodic memory)
+- `memories/diary/*.md`: dream diary entries
 
-- Capture a memory note:
-  - `node enkidu.js capture --title "..." --tags "tag1,tag2" --text "..."`
+### Generated caches (gitignored)
+- `memories/_index.json`: index of memory notes (paths + metadata + preview + importance)
+- `memories/_embeddings.json`: embeddings cache for memory notes (hash + vector per note)
+- `memories/_source_embeddings.json`: embeddings cache for stored verbatim sources
 
-- Rebuild index:
-  - `node enkidu.js index`
+### Instructions (soft architecture)
+- `instructions/work.md`: system prompt for `work` (also defines `===WEB_FETCH===` + `===CAPTURE===`)
+- `instructions/dream.md`: system prompt for `dream` (can edit `memories/` + `instructions/`, not code)
+- `instructions/sources.md`: system prompt for ingesting a source file into a curated memory note
 
-- Ask Enkidu something:
-  - `node enkidu.js work "your prompt here"`
+## Work pipeline (heuristic-first)
+1. **Heuristic router** decides whether to include recency and whether to do AI query expansion.
+2. **Recency** (if needed): include recent turns from `memories/sessions/recent.jsonl`.
+3. **Retrieval**:
+   - embeddings retrieval over `memories/` (weighted by `importance`)
+   - optional AI query expansion for vague prompts
+4. **Sources retrieval** (if ingested): embeddings retrieval over `memories/sources/verbatim/`.
+   - default excerpt size: 4k chars
+   - if prompt asks for “verbatim / quote / full text”: include up to 20k chars
+5. **Answer call** → response + `===CAPTURE=== ...` (auto-capture writes to inbox and updates embeddings)
 
-- Run dream (autonomous; writes a diary entry):
-  - `node enkidu.js dream`
+UI shows:
+- “Used memories” (and their importance)
+- “Used sources”
 
-## UI
+## Dream
+- Dream can modify only `memories/` and `instructions/`.
+- It cannot edit `enkidu.js` or the generated caches.
+- After dream edits, embeddings are refreshed incrementally (hash-based).
 
-- Start local UI server:
-  - `node enkidu.js serve --port 3000`
-
-Then open `http://localhost:3000`.
-
-### Dev auto-restart
-
-- Auto-restart when `enkidu.js` or `instructions/*.md` changes:
-  - `npm run serve:watch`
-
-## Files
-- `instructions/work.md`: editable instruction for `work`
-- `instructions/dream.md`: editable instruction for `dream`
-- `memories/`: source of truth
-- `memories/diary/`: dream diary entries
-- `memories/_index.json`: generated index (gitignored)
+## Sources (ingest)
+UI “Sources (ingest)”:
+- select a folder of `.md` files (subfolders allowed)
+- click **Ingest**
+- server writes:
+  - verbatim store: `memories/sources/verbatim/*.md` (read-only)
+  - curated memory notes filed to `memories/{inbox,people,projects,howto}/`
+  - source embeddings for later retrieval

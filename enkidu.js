@@ -435,9 +435,21 @@ async function retrieveTopSourcesByEmbeddings(queries, topN) {
   for (const rel of picked) {
     const abs = path.join(REPO_ROOT, rel);
     if (!fs.existsSync(abs)) continue;
-    out.push({ path: rel, content: (await readFileUtf8(abs)).slice(0, 4000) });
+    out.push({ path: rel, content: await readFileUtf8(abs) });
   }
   return out;
+}
+
+function wantsVerbatimSources(prompt) {
+  const p = String(prompt || "").toLowerCase();
+  return (
+    p.includes("full text") ||
+    p.includes("verbatim") ||
+    p.includes("quote") ||
+    p.includes("quotes") ||
+    p.includes("exact wording") ||
+    p.includes("exact text")
+  );
 }
 
 async function ensureEmbeddingsCache() {
@@ -830,10 +842,11 @@ async function workCore({ prompt, model, history, runNow }) {
   // Read-only sources (server-side verbatim store + embeddings).
   const storedSources = fast ? [] : await retrieveTopSourcesByEmbeddings(queries, 3);
   if (storedSources.length) {
+    const maxChars = wantsVerbatimSources(prompt) ? 20000 : 4000;
     const srcChunks = storedSources
       .map((s) => {
         const p = String(s?.path || "");
-        const c = String(s?.content || "").trim();
+        const c = String(s?.content || "").slice(0, maxChars).trim();
         return [`[Source] ${p}`, "---", c].join("\n");
       })
       .join("\n\n");
