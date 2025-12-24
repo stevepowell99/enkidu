@@ -47,6 +47,11 @@ function nowIso() {
   return new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
 }
 
+function filenameTimestamp() {
+  // Lowercase, filesystem-friendly timestamp for filenames (e.g. 20251224t112233z)
+  return nowIso().toLowerCase().replace(/[-:]/g, "").replace(/\./g, "");
+}
+
 function slugify(s) {
   return (s || "")
     .trim()
@@ -329,7 +334,7 @@ async function writeAutoCaptureToInbox(capture) {
   }
 
   const created = nowIso();
-  const fname = `${created.replace(/[-:]/g, "").replace("Z", "Z")}_${slugify(title).slice(0, 60)}.md`;
+  const fname = `${filenameTimestamp()}_${slugify(title).slice(0, 60)}.md`.toLowerCase();
   const p = path.join(MEMORIES_DIR, "inbox", fname);
   assertWithinMemories(p);
 
@@ -531,7 +536,7 @@ async function cmdCapture(args) {
   if (!text) throw new Error("--text is required");
 
   const created = nowIso();
-  const fname = `${created.replace(/[-:]/g, "").replace("Z", "Z")}_${slugify(title).slice(0, 60)}.md`;
+  const fname = `${filenameTimestamp()}_${slugify(title).slice(0, 60)}.md`.toLowerCase();
   const p = path.join(MEMORIES_DIR, "inbox", fname);
 
   const md = [
@@ -642,8 +647,8 @@ async function cmdDream() {
   await writeIndex(newEntries);
 
   // Write diary entry.
-  const diaryTs = nowIso().replace(/[:.]/g, "").replace("Z", "Z");
-  const diaryPath = path.join(MEMORIES_DIR, "diary", `${diaryTs}_dream.md`);
+  const diaryTs = filenameTimestamp();
+  const diaryPath = path.join(MEMORIES_DIR, "diary", `${diaryTs}_dream.md`.toLowerCase());
   const diaryMd = [
     "---",
     `title: Dream diary (${nowIso()})`,
@@ -800,19 +805,6 @@ async function cmdServe(args) {
         return sendJson(res, 200, { answer, capturePath, usedMemories });
       }
 
-      if (req.method === "POST" && u.pathname === "/api/capture") {
-        const body = await readRequestBody(req);
-        const data = req.headers["content-type"]?.includes("application/json")
-          ? safeJsonParse(body) || {}
-          : parseFormUrlEncoded(body);
-        const title = String(data.title || "").trim();
-        const tags = String(data.tags || "").trim();
-        const text = String(data.text || "").trim();
-        if (!title || !text) return sendJson(res, 400, { error: "Missing title or text" });
-        await cmdCapture({ title, tags, text });
-        return sendJson(res, 200, { ok: true });
-      }
-
       if (req.method === "POST" && u.pathname === "/api/dream") {
         await cmdDream();
         return sendJson(res, 200, { ok: true });
@@ -913,12 +905,25 @@ function renderHtml() {
   // Single-file UI. Bootstrap via CDN.
   const modelOptions = [
     { id: "", label: "(default)" },
-    { id: "gpt-5.2", label: "gpt-5.2 (out: unknown)" },
-    { id: "gpt-5", label: "gpt-5 (out: unknown)" },
-    { id: "gpt-4.1", label: "gpt-4.1 (out: unknown)" },
-    { id: "gpt-4.1-mini", label: "gpt-4.1-mini (out: unknown)" },
-    { id: "gpt-4o", label: "gpt-4o (out: unknown)" },
-    { id: "gpt-4o-mini", label: "gpt-4o-mini (out: unknown)" }
+    { id: "gpt-5.2", label: "gpt-5.2 (out: $14.00/1M)" },
+    { id: "gpt-5.1", label: "gpt-5.1 (out: $10.00/1M)" },
+    { id: "gpt-5", label: "gpt-5 (out: $10.00/1M)" },
+    { id: "gpt-5-mini", label: "gpt-5-mini (out: $2.00/1M)" },
+    { id: "gpt-5-nano", label: "gpt-5-nano (out: $0.40/1M)" },
+    { id: "gpt-5.2-chat-latest", label: "gpt-5.2-chat-latest (out: $14.00/1M)" },
+    { id: "gpt-5.1-chat-latest", label: "gpt-5.1-chat-latest (out: $10.00/1M)" },
+    { id: "gpt-5-chat-latest", label: "gpt-5-chat-latest (out: $10.00/1M)" },
+    { id: "gpt-5.1-codex-max", label: "gpt-5.1-codex-max (out: $10.00/1M)" },
+    { id: "gpt-5.1-codex", label: "gpt-5.1-codex (out: $10.00/1M)" },
+    { id: "gpt-5-codex", label: "gpt-5-codex (out: $10.00/1M)" },
+    { id: "gpt-5.2-pro", label: "gpt-5.2-pro (out: $168.00/1M)" },
+    { id: "gpt-5-pro", label: "gpt-5-pro (out: $120.00/1M)" },
+    { id: "gpt-4.1", label: "gpt-4.1 (out: $8.00/1M)" },
+    { id: "gpt-4.1-mini", label: "gpt-4.1-mini (out: $1.60/1M)" },
+    { id: "gpt-4.1-nano", label: "gpt-4.1-nano (out: $0.40/1M)" },
+    { id: "gpt-4o", label: "gpt-4o (out: $10.00/1M)" },
+    { id: "gpt-4o-2024-05-13", label: "gpt-4o-2024-05-13 (out: $15.00/1M)" },
+    { id: "gpt-4o-mini", label: "gpt-4o-mini (out: $0.60/1M)" }
   ];
 
   const modelOptionsHtml = modelOptions
@@ -976,32 +981,11 @@ function renderHtml() {
                 <button id=\"clearHistoryBtn\" class=\"btn btn-outline-secondary\">Start over</button>
               </div>
               <div id=\"workStatus\" class=\"mt-2 small text-muted\"></div>
+              <div id=\"autoCaptureStatus\" class=\"small text-muted\"></div>
               <details class=\"mt-2\">
                 <summary class=\"small text-muted\">Used memories</summary>
                 <div id=\"usedMemories\" class=\"small mt-1\"></div>
               </details>
-            </div>
-          </div>
-        </div>
-
-        <div class=\"col-12 col-lg-6\">
-          <div class=\"card shadow-sm\">
-            <div class=\"card-body\">
-              <h2 class=\"h5\">Capture</h2>
-              <div class=\"row g-2\">
-                <div class=\"col-12\">
-                  <input id=\"capTitle\" class=\"form-control\" placeholder=\"Title\"/>
-                </div>
-                <div class=\"col-12\">
-                  <input id=\"capTags\" class=\"form-control\" placeholder=\"Tags (comma separated)\"/>
-                </div>
-                <div class=\"col-12\">
-                  <textarea id=\"capText\" class=\"form-control\" rows=\"4\" placeholder=\"Memory text...\"></textarea>
-                </div>
-              </div>
-              <button id=\"capBtn\" class=\"btn btn-secondary mt-2\">Save</button>
-              <div id=\"capOut\" class=\"mt-2 small text-muted\"></div>
-              <div id=\"autoCapOut\" class=\"mt-1 small text-muted\"></div>
             </div>
           </div>
         </div>
@@ -1122,6 +1106,7 @@ function renderHtml() {
       const chatHistoryEl = document.getElementById('chatHistory');
       const workStatus = document.getElementById('workStatus');
       const usedMemoriesEl = document.getElementById('usedMemories');
+      const autoCaptureStatusEl = document.getElementById('autoCaptureStatus');
 
       // Persist model selection.
       const savedModel = localStorage.getItem('enkidu.workModel') || '';
@@ -1209,9 +1194,9 @@ function renderHtml() {
         }
         workStatus.textContent = resp && resp.error ? ('Error: ' + resp.error) : '';
         if (resp.capturePath) {
-          autoCapOut.textContent = 'Auto-captured to: ' + resp.capturePath;
+          autoCaptureStatusEl.textContent = 'Captured: ' + resp.capturePath;
         } else {
-          autoCapOut.textContent = '';
+          autoCaptureStatusEl.textContent = '';
         }
 
         // Show which memories were included for retrieval.
@@ -1241,20 +1226,8 @@ function renderHtml() {
         renderHistory();
         workPrompt.value = '';
         workStatus.textContent = '';
-        autoCapOut.textContent = '';
+        autoCaptureStatusEl.textContent = '';
         usedMemoriesEl.textContent = '';
-      };
-
-      const capBtn = document.getElementById('capBtn');
-      const capTitle = document.getElementById('capTitle');
-      const capTags = document.getElementById('capTags');
-      const capText = document.getElementById('capText');
-      const capOut = document.getElementById('capOut');
-      const autoCapOut = document.getElementById('autoCapOut');
-      capBtn.onclick = async () => {
-        capOut.textContent = 'Saving...';
-        const resp = await postJson('/api/capture', { title: capTitle.value, tags: capTags.value, text: capText.value });
-        capOut.textContent = resp.ok ? 'Saved.' : (resp.error || 'Error');
       };
 
       const dreamBtn = document.getElementById('dreamBtn');

@@ -12,7 +12,7 @@ Put these in `.env` (or real env vars):
 - `OPENAI_MODEL` (optional, default: `gpt-4o-mini`)
 - `OPENAI_BASE_URL` (optional, default: `https://api.openai.com/v1`)
 
-Note: the UI model dropdown shows **placeholder** prices (`$?/1M`) because I couldn't reliably fetch current pricing in this environment. You can still select any model id, and you can always type a custom model id.
+UI model dropdown shows output prices (per 1M tokens) next to model names.
 
 ## CLI commands
 
