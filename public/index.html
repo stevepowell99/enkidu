@@ -161,6 +161,20 @@
             <div class="card-body">
               <h2 class="h5">Sources (ingest)</h2>
               <div class="small text-muted">Pick a folder of markdown files; Enkidu will store verbatim sources and create curated memory notes.</div>
+              <div class="row g-2 mt-2">
+                <div class="col-12 col-lg-4">
+                  <label class="form-label small text-muted mb-1">Source set name (optional)</label>
+                  <input id="sourcesMetaName" class="form-control" placeholder="e.g. Causal map app docs"/>
+                </div>
+                <div class="col-12 col-lg-4">
+                  <label class="form-label small text-muted mb-1">Default tags (optional)</label>
+                  <input id="sourcesMetaTags" class="form-control" placeholder="comma,separated,tags"/>
+                </div>
+                <div class="col-12 col-lg-4">
+                  <label class="form-label small text-muted mb-1">Context (what are these files?)</label>
+                  <input id="sourcesMetaContext" class="form-control" placeholder="one-line description (helps tagging + filing)"/>
+                </div>
+              </div>
               <div class="row g-2 align-items-end mt-1">
                 <div class="col-12 col-lg-8">
                   <input id="sourcesFolder" class="form-control" type="file" webkitdirectory multiple />
@@ -287,6 +301,40 @@
       const ingestSourcesBtn = document.getElementById('ingestSourcesBtn');
       const clearSourcesBtn = document.getElementById('clearSourcesBtn');
       const sourcesStatusEl = document.getElementById('sourcesStatus');
+      const sourcesMetaNameEl = document.getElementById('sourcesMetaName');
+      const sourcesMetaTagsEl = document.getElementById('sourcesMetaTags');
+      const sourcesMetaContextEl = document.getElementById('sourcesMetaContext');
+
+      // Persist sources metadata (browser-local).
+      function loadSourcesMeta() {
+        return {
+          name: localStorage.getItem('enkidu.sourcesMeta.name') || '',
+          tags: localStorage.getItem('enkidu.sourcesMeta.tags') || '',
+          context: localStorage.getItem('enkidu.sourcesMeta.context') || '',
+        };
+      }
+      function saveSourcesMeta(meta) {
+        localStorage.setItem('enkidu.sourcesMeta.name', meta.name || '');
+        localStorage.setItem('enkidu.sourcesMeta.tags', meta.tags || '');
+        localStorage.setItem('enkidu.sourcesMeta.context', meta.context || '');
+      }
+      const _meta0 = loadSourcesMeta();
+      sourcesMetaNameEl.value = _meta0.name;
+      sourcesMetaTagsEl.value = _meta0.tags;
+      sourcesMetaContextEl.value = _meta0.context;
+      [sourcesMetaNameEl, sourcesMetaTagsEl, sourcesMetaContextEl].forEach(el => {
+        el.addEventListener('input', () => {
+          saveSourcesMeta({ name: sourcesMetaNameEl.value, tags: sourcesMetaTagsEl.value, context: sourcesMetaContextEl.value });
+        });
+      });
+
+      function currentSourcesMeta() {
+        return {
+          name: (sourcesMetaNameEl.value || '').trim(),
+          tags: (sourcesMetaTagsEl.value || '').trim(),
+          context: (sourcesMetaContextEl.value || '').trim(),
+        };
+      }
 
       function selectedMdFiles() {
         return Array.from(sourcesFolderEl.files || []).filter(f => {
@@ -315,6 +363,7 @@
         sourcesStatusEl.textContent = 'Ingesting... (preparing files)';
 
         const model = getSelectedModel();
+        const meta = currentSourcesMeta();
         let done = 0;
         let createdMem = 0;
         let createdSrc = 0;
@@ -330,7 +379,7 @@
               payloadFiles.push({ path: rel, content: await f.text() });
             }
             sourcesStatusEl.textContent = 'Ingesting... uploading batch ' + (Math.floor(i / batchSize) + 1) + '/' + Math.ceil(files.length / batchSize);
-            const resp = await postJson('/api/sources/ingest', { model, files: payloadFiles });
+            const resp = await postJson('/api/sources/ingest', { model, meta, files: payloadFiles });
             if (resp && resp.error) {
               sourcesStatusEl.textContent = 'Error: ' + resp.error;
               return;

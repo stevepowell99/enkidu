@@ -276,6 +276,42 @@ function trimForEmbedding(text) {
   return trimToApproxTokens(String(text || ""), maxTokens);
 }
 
+function toSingleLine(s, maxLen = 280) {
+  const t = String(s || "")
+    .replace(/\r?\n/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!t) return "";
+  if (t.length <= maxLen) return t;
+  return t.slice(0, maxLen).trim() + "…";
+}
+
+function splitTags(tagsStr) {
+  return String(tagsStr || "")
+    .split(/[,;]/)
+    .map((t) => t.trim())
+    .filter(Boolean);
+}
+
+function mergeTagsStrings(a, b) {
+  const out = [];
+  const seen = new Set();
+  for (const t of [...splitTags(a), ...splitTags(b)]) {
+    const k = t.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(t);
+  }
+  return out.join(", ");
+}
+
+function normaliseSourcesMeta(meta) {
+  const name = toSingleLine(meta?.name || "", 120);
+  const tags = mergeTagsStrings("", meta?.tags || "");
+  const context = toSingleLine(meta?.context || "", 300);
+  return { name, tags, context };
+}
+
 function dot(a, b) {
   let s = 0;
   const n = Math.min(a.length, b.length);
@@ -1724,11 +1760,12 @@ async function applyDreamOpsSupabase(ops) {
   return applied;
 }
 
-async function ingestSourcesBatch(files, model) {
+async function ingestSourcesBatch(files, model, meta = {}) {
   // files: [{path, content}] from UI folder picker
-  if (isSupabaseMode()) return await ingestSourcesBatchSupabase(files, model);
+  if (isSupabaseMode()) return await ingestSourcesBatchSupabase(files, model, meta);
   await ensureDirs();
   const sys = await readInstruction(SOURCES_INSTRUCTION_FILE);
+  const sm = normaliseSourcesMeta(meta);
 
   const createdSources = [];
   const createdMemories = [];
@@ -1752,15 +1789,19 @@ async function ingestSourcesBatch(files, model) {
 
     // Write verbatim copy once (read-only store).
     if (!fs.existsSync(verbatimAbs)) {
+      const verbatimTags = mergeTagsStrings("source, verbatim", sm.tags);
       const md = [
         "---",
         `title: ${baseSlug}`,
         `created: ${nowIso()}`,
-        "tags: source, verbatim",
+        `tags: ${verbatimTags}`,
         "importance: 0",
         "source: sources_ingest",
         `source_id: ${sourceId}`,
         `original_path: ${normPath}`,
+        sm.name ? `source_set: ${sm.name}` : "",
+        sm.tags ? `source_set_tags: ${sm.tags}` : "",
+        sm.context ? `source_set_context: ${sm.context}` : "",
         "---",
         "",
         content,
@@ -1773,7 +1814,11 @@ async function ingestSourcesBatch(files, model) {
     createdSources.push({ original_path: normPath, verbatim_path: verbatimRel });
 
     // Ask model to produce a curated memory note (filed like dream would).
-    const userPayload = JSON.stringify({ original_path: normPath, source_content: content.slice(0, 12000) }, null, 2);
+    const userPayload = JSON.stringify(
+      { original_path: normPath, source_set: sm, source_content: content.slice(0, 12000) },
+      null,
+      2
+    );
     const messages = [
       { role: "system", content: sys },
       { role: "user", content: userPayload },
@@ -1787,7 +1832,7 @@ async function ingestSourcesBatch(files, model) {
     if (!allowed.has(dest)) continue;
 
     const title = String(parsed.title || baseSlug).trim() || baseSlug;
-    const tags = String(parsed.tags || "source").trim();
+    const tags = mergeTagsStrings(String(parsed.tags || "source").trim(), sm.tags);
     const importance = Number.isFinite(Number(parsed.importance)) ? Math.max(0, Math.min(3, Number(parsed.importance))) : 1;
     const summaryMd = String(parsed.summary_md || "").trim();
     const why = String(parsed.why || "").trim();
@@ -1807,6 +1852,9 @@ async function ingestSourcesBatch(files, model) {
       "source: sources_ingest",
       `source_ref: ${verbatimRel}`,
       `original_path: ${normPath}`,
+      sm.name ? `source_set: ${sm.name}` : "",
+      sm.tags ? `source_set_tags: ${sm.tags}` : "",
+      sm.context ? `source_set_context: ${sm.context}` : "",
       "---",
       "",
       summaryMd,
@@ -1828,9 +1876,10 @@ async function ingestSourcesBatch(files, model) {
   return { createdSources, createdMemories };
 }
 
-async function ingestSourcesBatchSupabase(files, model) {
+async function ingestSourcesBatchSupabase(files, model, meta = {}) {
   // Supabase-backed sources ingest: store verbatim in `sources`, curated notes in `memories`.
   const sys = await readInstruction(SOURCES_INSTRUCTION_FILE);
+  const sm = normaliseSourcesMeta(meta);
   const createdSources = [];
   const createdMemories = [];
 
@@ -1848,15 +1897,19 @@ async function ingestSourcesBatchSupabase(files, model) {
     const verbatimName = `${sourceId}_${baseSlug}.md`.toLowerCase();
     const verbatimRel = `memories/sources/verbatim/${verbatimName}`;
 
+    const verbatimTags = mergeTagsStrings("source, verbatim", sm.tags);
     const verbatimMd = [
       "---",
       `title: ${baseSlug}`,
       `created: ${nowIso()}`,
-      "tags: source, verbatim",
+      `tags: ${verbatimTags}`,
       "importance: 0",
       "source: sources_ingest",
       `source_id: ${sourceId}`,
       `original_path: ${normPath}`,
+      sm.name ? `source_set: ${sm.name}` : "",
+      sm.tags ? `source_set_tags: ${sm.tags}` : "",
+      sm.context ? `source_set_context: ${sm.context}` : "",
       "---",
       "",
       content,
@@ -1867,7 +1920,11 @@ async function ingestSourcesBatchSupabase(files, model) {
     createdSources.push({ original_path: normPath, verbatim_path: verbatimRel });
 
     // Ask model to produce a curated memory note (filed like dream would).
-    const userPayload = JSON.stringify({ original_path: normPath, source_content: content.slice(0, 12000) }, null, 2);
+    const userPayload = JSON.stringify(
+      { original_path: normPath, source_set: sm, source_content: content.slice(0, 12000) },
+      null,
+      2
+    );
     const messages = [
       { role: "system", content: sys },
       { role: "user", content: userPayload },
@@ -1881,7 +1938,7 @@ async function ingestSourcesBatchSupabase(files, model) {
     if (!allowed.has(dest)) continue;
 
     const title = String(parsed.title || baseSlug).trim() || baseSlug;
-    const tags = String(parsed.tags || "source").trim();
+    const tags = mergeTagsStrings(String(parsed.tags || "source").trim(), sm.tags);
     const importance = Number.isFinite(Number(parsed.importance)) ? Math.max(0, Math.min(3, Number(parsed.importance))) : 1;
     const summaryMd = String(parsed.summary_md || "").trim();
     const why = String(parsed.why || "").trim();
@@ -1899,6 +1956,9 @@ async function ingestSourcesBatchSupabase(files, model) {
       "source: sources_ingest",
       `source_ref: ${verbatimRel}`,
       `original_path: ${normPath}`,
+      sm.name ? `source_set: ${sm.name}` : "",
+      sm.tags ? `source_set_tags: ${sm.tags}` : "",
+      sm.context ? `source_set_context: ${sm.context}` : "",
       "---",
       "",
       summaryMd,
@@ -2029,8 +2089,9 @@ export async function apiHandleRequest({ method, pathname, searchParams, headers
       ? safeJsonParse(bodyText) || {}
       : parseFormUrlEncoded(bodyText);
     const model = String(data.model || "").trim();
+    const meta = data.meta || {};
     const files = Array.isArray(data.files) ? data.files : [];
-    const out = await ingestSourcesBatch(files, model);
+    const out = await ingestSourcesBatch(files, model, meta);
     return { statusCode: 200, json: { ok: true, ...out } };
   }
 
