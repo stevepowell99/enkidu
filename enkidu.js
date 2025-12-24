@@ -390,6 +390,21 @@ async function cmdEmbed(args = {}) {
   cache.generated_at = nowIso();
   cache.items = cache.items || {};
 
+  // Normalise cache keys so moves/OS path separators don't break lookups.
+  // - Convert absolute paths under repo into repo-relative paths.
+  // - Convert backslashes to forward slashes.
+  for (const k of Object.keys(cache.items)) {
+    let nk = String(k || "");
+    if (path.isAbsolute(nk)) nk = safeRelPath(nk);
+    nk = nk.replaceAll("\\", "/").replace(/^\.\/+/, "");
+    if (nk !== k) {
+      cache.items[nk] = cache.items[k];
+      delete cache.items[k];
+    }
+  }
+
+  const currentPaths = new Set(entries.map((e) => String(e.path || "").replaceAll("\\", "/")));
+
   let updated = 0;
   for (const e of entries) {
     const rel = String(e.path || "");
@@ -409,6 +424,11 @@ async function cmdEmbed(args = {}) {
     const vec = await openaiEmbed(embedText, { model });
     cache.items[rel] = { hash: h, vector: vec };
     updated += 1;
+  }
+
+  // Prune embeddings for files that no longer exist in the index (e.g. after dream moves/renames/deletes).
+  for (const k of Object.keys(cache.items)) {
+    if (!currentPaths.has(String(k || ""))) delete cache.items[k];
   }
 
   await writeEmbeddingsCache(cache);
