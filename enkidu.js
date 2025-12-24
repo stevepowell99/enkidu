@@ -2156,6 +2156,17 @@ function safeJsonParse(s) {
 async function applyDreamOps(ops) {
   // Apply ops inside writable roots (memories/ and instructions/). Validate every path.
   const applied = [];
+  const movedMap = new Map(); // from -> to (track within this run to avoid stale paths)
+
+  function resolveMovedPath(rel) {
+    let cur = String(rel || "");
+    const seen = new Set();
+    while (movedMap.has(cur) && !seen.has(cur)) {
+      seen.add(cur);
+      cur = movedMap.get(cur);
+    }
+    return cur;
+  }
 
   for (const op of ops) {
     const kind = String(op?.op || "").toLowerCase();
@@ -2182,8 +2193,9 @@ async function applyDreamOps(ops) {
     }
 
     if (kind === "move") {
-      const from = String(op?.from || "");
+      const fromRaw = String(op?.from || "");
       const to = String(op?.to || "");
+      const from = resolveMovedPath(fromRaw);
       const absFrom = path.join(REPO_ROOT, from);
       const absTo = path.join(REPO_ROOT, to);
       assertWithinWritableRoots(absFrom);
@@ -2191,8 +2203,29 @@ async function applyDreamOps(ops) {
       assertNotProtectedWritable(absFrom);
       assertNotProtectedWritable(absTo);
       await fsp.mkdir(path.dirname(absTo), { recursive: true });
-      await fsp.rename(absFrom, absTo);
-      applied.push({ op: "move", from, to });
+      if (!fs.existsSync(absFrom)) {
+        applied.push({ op: "move", from: fromRaw, to, skipped: true, error: "missing_from", resolved_from: from });
+        continue;
+      }
+      if (fs.existsSync(absTo)) {
+        applied.push({ op: "move", from: fromRaw, to, skipped: true, error: "to_exists", resolved_from: from });
+        continue;
+      }
+      try {
+        await fsp.rename(absFrom, absTo);
+        movedMap.set(fromRaw, to);
+        movedMap.set(from, to);
+        applied.push({ op: "move", from: fromRaw, to, resolved_from: from });
+      } catch (e) {
+        applied.push({
+          op: "move",
+          from: fromRaw,
+          to,
+          resolved_from: from,
+          error: "rename_failed",
+          message: String(e?.message || e),
+        });
+      }
       continue;
     }
 
