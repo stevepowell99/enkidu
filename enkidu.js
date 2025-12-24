@@ -938,6 +938,34 @@ function renderHtml() {
     <title>Enkidu</title>
     <link href=\"https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css\" rel=\"stylesheet\">
     <style>
+      :root {
+        /* Gilgamesh palette: lapis lazuli + gold + sand */
+        --enkidu-lapis: #0b3b7a;
+        --enkidu-lapis2: #102a4c;
+        --enkidu-gold: #c9a227;
+        --enkidu-sand: #f3ead8;
+        --enkidu-ink: #101828;
+      }
+
+      body.bg-light {
+        color: var(--enkidu-ink);
+        background:
+          radial-gradient(1200px 600px at 10% 0%, rgba(201,162,39,0.20), transparent 60%),
+          radial-gradient(900px 500px at 90% 10%, rgba(11,59,122,0.25), transparent 55%),
+          linear-gradient(180deg, rgba(243,234,216,0.95), rgba(243,234,216,0.80));
+      }
+
+      /* Subtle cuneiform-style pattern (inline SVG) */
+      body.bg-light::before {
+        content: '';
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        opacity: 0.08;
+        background-image: url(\"data:image/svg+xml,%3Csvg%20xmlns%3D'http%3A//www.w3.org/2000/svg'%20width%3D'220'%20height%3D'220'%20viewBox%3D'0%200%20220%20220'%3E%3Crect%20width%3D'220'%20height%3D'220'%20fill%3D'none'/%3E%3Cg%20fill%3D'%230b3b7a'%3E%3Crect%20x%3D'18'%20y%3D'22'%20width%3D'10'%20height%3D'42'%20rx%3D'2'/%3E%3Crect%20x%3D'34'%20y%3D'34'%20width%3D'34'%20height%3D'10'%20rx%3D'2'/%3E%3Crect%20x%3D'74'%20y%3D'22'%20width%3D'10'%20height%3D'42'%20rx%3D'2'/%3E%3Crect%20x%3D'96'%20y%3D'56'%20width%3D'52'%20height%3D'10'%20rx%3D'2'/%3E%3Crect%20x%3D'148'%20y%3D'30'%20width%3D'10'%20height%3D'36'%20rx%3D'2'/%3E%3Crect%20x%3D'26'%20y%3D'96'%20width%3D'58'%20height%3D'10'%20rx%3D'2'/%3E%3Crect%20x%3D'26'%20y%3D'114'%20width%3D'10'%20height%3D'52'%20rx%3D'2'/%3E%3Crect%20x%3D'52'%20y%3D'138'%20width%3D'66'%20height%3D'10'%20rx%3D'2'/%3E%3Crect%20x%3D'134'%20y%3D'108'%20width%3D'10'%20height%3D'62'%20rx%3D'2'/%3E%3Crect%20x%3D'150'%20y%3D'122'%20width%3D'44'%20height%3D'10'%20rx%3D'2'/%3E%3Crect%20x%3D'166'%20y%3D'150'%20width%3D'28'%20height%3D'10'%20rx%3D'2'/%3E%3C/g%3E%3C/svg%3E\");
+        background-size: 220px 220px;
+      }
+
       /* Basic markdown styling inside chat bubbles */
       #chatHistory code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace; }
       #chatHistory pre { background: rgba(0,0,0,0.05); padding: .75rem; border-radius: .5rem; overflow-x: auto; }
@@ -946,13 +974,48 @@ function renderHtml() {
       .enkidu-typingDots span:nth-child(2) { animation-delay: .15s; }
       .enkidu-typingDots span:nth-child(3) { animation-delay: .30s; }
       @keyframes enkiduDotPulse { 0%, 80%, 100% { opacity: .2; } 40% { opacity: 1; } }
+
+      .enkidu-hero {
+        background: linear-gradient(135deg, rgba(11,59,122,0.92), rgba(16,42,76,0.92));
+        border: 1px solid rgba(255,255,255,0.10);
+      }
+
+      .enkidu-hero .enkidu-title {
+        letter-spacing: 0.4px;
+      }
+
+      .enkidu-hero .enkidu-subtitle {
+        color: rgba(255,255,255,0.80);
+      }
+
+      .card.shadow-sm {
+        border: 1px solid rgba(16,42,76,0.10);
+      }
+
+      .btn-primary {
+        background-color: var(--enkidu-lapis);
+        border-color: rgba(16,42,76,0.30);
+      }
+      .btn-primary:hover { background-color: #09407f; }
+
+      .btn-warning {
+        background-color: var(--enkidu-gold);
+        border-color: rgba(0,0,0,0.10);
+        color: #1b1405;
+      }
+      .btn-warning:hover { filter: brightness(0.98); }
     </style>
   </head>
   <body class=\"bg-light\">
     <div class=\"container py-4\">
-      <div class=\"d-flex align-items-center justify-content-between mb-3\">
-        <h1 class=\"h3 m-0\">Enkidu</h1>
-        <div class=\"text-muted small\">Local-first UI</div>
+      <div class=\"enkidu-hero rounded-4 shadow-sm p-3 p-md-4 mb-3\">
+        <div class=\"d-flex align-items-center justify-content-between\">
+          <div>
+            <div class=\"h3 m-0 text-white enkidu-title\">Enkidu</div>
+            <div class=\"small enkidu-subtitle\">Gilgamesh-flavoured, local-first assistant</div>
+          </div>
+          <div class=\"small enkidu-subtitle\">UI</div>
+        </div>
       </div>
 
       <div class=\"row g-3\">
