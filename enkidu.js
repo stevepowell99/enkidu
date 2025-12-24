@@ -2873,11 +2873,13 @@ async function cmdServeWatch(args) {
   const port = Number(args.port || process.env.PORT || DEFAULT_PORT);
 
   const scriptPath = path.join(REPO_ROOT, "enkidu.js");
-  const watchFiles = [
-    scriptPath,
-    path.join(INSTRUCTIONS_DIR, "work.md"),
-    path.join(INSTRUCTIONS_DIR, "dream.md"),
-  ];
+  // IMPORTANT: We intentionally do NOT restart on instruction changes by default.
+  // Instructions are read at request-time, and Dream may update instructions during an API call;
+  // restarting mid-request causes ERR_CONNECTION_RESET in the browser.
+  const watchInstructions = String(process.env.ENKIDU_WATCH_INSTRUCTIONS || "").toLowerCase() === "true";
+  const watchFiles = watchInstructions
+    ? [scriptPath, path.join(INSTRUCTIONS_DIR, "work.md"), path.join(INSTRUCTIONS_DIR, "dream.md")]
+    : [scriptPath];
 
   let child = null;
   let debounceTimer = null;
@@ -2926,7 +2928,11 @@ async function cmdServeWatch(args) {
   }
 
   await ensureDirs();
-  console.log("Watch mode: restarting server on changes to enkidu.js or instructions/*.md");
+  console.log(
+    watchInstructions
+      ? "Watch mode: restarting server on changes to enkidu.js or instructions/*.md"
+      : "Watch mode: restarting server on changes to enkidu.js (instructions changes do not restart)"
+  );
 
   // Seed mtimes so we don't restart from spurious watch events.
   for (const f of watchFiles) {
