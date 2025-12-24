@@ -1021,12 +1021,14 @@
           fileOut.textContent = r.content || r.error || 'Error';
         };
 
-        return { container: document.createElement('div'), row, children };
+        const container = document.createElement('div');
+        container.appendChild(row);
+        container.appendChild(children);
+
+        return { container, row, children };
       }
 
       function appendTreeRow(parentEl, rowObj) {
-        rowObj.container.appendChild(rowObj.row);
-        rowObj.container.appendChild(rowObj.children);
         parentEl.appendChild(rowObj.container);
       }
 
