@@ -1213,11 +1213,16 @@ async function ingestSourcesBatch(files, model) {
 
   for (const f of files) {
     const originalPath = String(f?.path || "").trim() || "unknown.md";
+    // Ignore dotfiles / dotfolders from user-selected source trees.
+    const normPath = originalPath.replaceAll("\\", "/");
+    const parts = normPath.split("/").filter(Boolean);
+    if (parts.some((p) => p.startsWith("."))) continue;
+
     const content = String(f?.content || "");
     if (!content.trim()) continue;
 
     const sourceId = sha256Hex(content).slice(0, 12);
-    const baseSlug = slugify(path.basename(originalPath).replace(/\.md$/i, "")) || "source";
+    const baseSlug = slugify(path.basename(normPath).replace(/\.md$/i, "")) || "source";
     const verbatimName = `${sourceId}_${baseSlug}.md`.toLowerCase();
     const verbatimRel = `memories/sources/verbatim/${verbatimName}`;
     const verbatimAbs = path.join(REPO_ROOT, verbatimRel);
@@ -1233,7 +1238,7 @@ async function ingestSourcesBatch(files, model) {
         "importance: 0",
         "source: sources_ingest",
         `source_id: ${sourceId}`,
-        `original_path: ${originalPath}`,
+        `original_path: ${normPath}`,
         "---",
         "",
         content,
@@ -1243,10 +1248,10 @@ async function ingestSourcesBatch(files, model) {
       await updateEmbeddingForSourcePath(verbatimRel);
     }
 
-    createdSources.push({ original_path: originalPath, verbatim_path: verbatimRel });
+    createdSources.push({ original_path: normPath, verbatim_path: verbatimRel });
 
     // Ask model to produce a curated memory note (filed like dream would).
-    const userPayload = JSON.stringify({ original_path: originalPath, source_content: content.slice(0, 12000) }, null, 2);
+    const userPayload = JSON.stringify({ original_path: normPath, source_content: content.slice(0, 12000) }, null, 2);
     const messages = [
       { role: "system", content: sys },
       { role: "user", content: userPayload },
@@ -1279,7 +1284,7 @@ async function ingestSourcesBatch(files, model) {
       `importance: ${importance}`,
       "source: sources_ingest",
       `source_ref: ${verbatimRel}`,
-      `original_path: ${originalPath}`,
+      `original_path: ${normPath}`,
       "---",
       "",
       summaryMd,
@@ -1830,7 +1835,13 @@ function renderHtml() {
       const sourcesStatusEl = document.getElementById('sourcesStatus');
 
       function selectedMdFiles() {
-        return Array.from(sourcesFolderEl.files || []).filter(f => String(f.name || '').toLowerCase().endsWith('.md'));
+        return Array.from(sourcesFolderEl.files || []).filter(f => {
+          const name = String(f.name || '');
+          const rel = String(f.webkitRelativePath || '');
+          if (name.startsWith('.')) return false;
+          if (rel.split('/').some(p => p.startsWith('.'))) return false;
+          return name.toLowerCase().endsWith('.md');
+        });
       }
 
       sourcesFolderEl.addEventListener('change', async () => {
