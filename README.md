@@ -2,6 +2,16 @@
 
 Single-file Node app (`enkidu.js`) + file-based memory store (`memories/`) + editable prompts (`instructions/`).
 
+## Concept (from `enkidu.md`)
+- **Goal**: a personal assistant with a file-based memory architecture (inspired by Letta/MemGPT-style ideas).
+- **System instruction**: enforced by Cursor project rules (not editable by Enkidu).
+- **Soft architecture**: keep “what dreaming means” in editable text instructions where possible (`instructions/*.md`), not hard-coded behavior.
+- **Operations**:
+  - **work**: answer requests using system instruction + work instruction + retrieved context
+  - **dream**: reorganise/update memory + (optionally) update instructions
+  - **restructure**: improve the instruction/memory architecture to get better context selection
+- **Future (not implemented yet)**: background autonomy, Gmail/Drive/tools, cloud hosting (Netlify+Supabase style)
+
 ## Requirements
 - Node.js 18+
 
