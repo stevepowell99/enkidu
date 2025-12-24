@@ -144,3 +144,14 @@ UI “Sources (ingest)”:
 - supabase mode server writes:
   - `sources` table rows (verbatim markdown)
   - `memories` table rows (curated notes)
+
+## Direct to dream
+Every user input starting with `d ` (d + space) is routed directly to the Dreamer instead of Work, e.g.:
+- `d tag the last imported notes as recipes`
+- `d move all the learning notes into a subfolder`
+
+This lets you give quick instructions to Dream from the chat without clicking the Dream button.  
+
+## spaced repetition
+
+exceptionally i want to hardcode a spaced repetition system. we can tag mems as "relevant for spaced rep" like from 1-3, so things i really want to get tested on get taged with a 3. then from time to time or when asked with a request starting m and a space, enkidu should respond with a spaced repetition test with answers 1-5 and a hardcoded 1-5 near the chat box so i can answer. things I get wrong get upgraded on a "spaced rep priority" tag say 1-5 and ones I get write get downgraded; ll 

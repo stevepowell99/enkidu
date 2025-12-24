@@ -1927,6 +1927,7 @@ async function cmdDream(args = {}) {
       role: "user",
       content:
         "You are running DREAM (step 1/2).\n\n" +
+        (customDir ? `User directive: ${customDir}\n\n` : "") +
         "Pick up to max_files_to_read files you need to read fully to make good edits.\n" +
         "Return ONLY valid JSON matching output_contract.\n\n" +
         JSON.stringify(step1, null, 2),
@@ -2041,10 +2042,11 @@ async function cmdDream(args = {}) {
   console.log(`Dream complete. Diary: ${safeRelPath(diaryPath)}`);
 }
 
-async function dreamPlanOnly({ model }) {
+async function dreamPlanOnly({ model, customInstruction }) {
   await ensureDirs();
   const instruction = await readInstruction(DREAM_INSTRUCTION_FILE);
   const m = String(model || "").trim();
+  const customDir = String(customInstruction || "").trim();
 
   const DREAM_CATALOG_MAX = Math.max(200, Math.min(5000, Number(process.env.ENKIDU_DREAM_CATALOG_MAX || 2000)));
   const DREAM_READ_MAX = Math.max(10, Math.min(120, Number(process.env.ENKIDU_DREAM_READ_MAX || 40)));
@@ -2115,6 +2117,7 @@ async function dreamPlanOnly({ model }) {
       role: "user",
       content:
         "You are running DREAM (step 1/2).\n\n" +
+        (customDir ? `User directive: ${customDir}\n\n` : "") +
         "Pick up to max_files_to_read files you need to read fully to make good edits.\n" +
         "Return ONLY valid JSON matching output_contract.\n\n" +
         JSON.stringify(step1, null, 2),
@@ -2837,9 +2840,10 @@ export async function apiHandleRequest({ method, pathname, searchParams, headers
       ? safeJsonParse(bodyText) || {}
       : parseFormUrlEncoded(bodyText);
     const model = String(data.model || "").trim();
+    const customInstruction = String(data.customInstruction || "").trim() || null;
 
     pruneDreamPlanCache();
-    const { plan, wantRead, note, summary } = await dreamPlanOnly({ model });
+    const { plan, wantRead, note, summary } = await dreamPlanOnly({ model, customInstruction });
     const planToken = makeDreamPlanToken();
     DREAM_PLAN_CACHE.set(planToken, { createdAtMs: Date.now(), plan });
 

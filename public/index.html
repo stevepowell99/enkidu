@@ -742,6 +742,26 @@
       });
 
       async function doWork(runNow) {
+        // Route "d ..." directly to Dream instead of Work.
+        const promptText = String(workPrompt.value || '').trim();
+        if (promptText.startsWith('d ')) {
+          const dreamInstruction = promptText.slice(2).trim();
+          if (!dreamInstruction) {
+            workStatus.textContent = 'Error: empty dream instruction (use "d <instruction>")';
+            return;
+          }
+          // Show the instruction in chat history as a user message.
+          const h = loadHistory();
+          h.push({ role: 'user', content: 'd ' + dreamInstruction });
+          saveHistory(h.slice(-20));
+          renderHistory();
+          workPrompt.value = '';
+          // Run Dream with the instruction passed as a custom directive.
+          // (For now we'll just trigger normal Dream; server-side we'd need to inject this as extra context.)
+          await doDream(getSelectedModel(), dreamInstruction);
+          return;
+        }
+
         workStatus.textContent = 'Working...';
         workBtn.disabled = true;
         workBtnNow.disabled = true;
@@ -842,10 +862,12 @@
       const diarySelect = document.getElementById('diarySelect');
       const diaryOut = document.getElementById('diaryOut');
 
-      async function doDream(model) {
+      async function doDream(model, customInstruction) {
         dreamBtn.disabled = true;
         refreshDiaryBtn.disabled = true;
-        diaryOut.textContent = 'Dream: planning (catalog + duplicates)...';
+        diaryOut.textContent = customInstruction 
+          ? ('Dream (custom): ' + customInstruction + '\n\nPlanning...')
+          : 'Dream: planning (catalog + duplicates)...';
         let ticker = null;
         const started = Date.now();
         function startTicker(prefix) {
@@ -856,7 +878,10 @@
           }, 1000);
         }
         try {
-          const plan = await postJson('/api/dream/plan', { model: model || getSelectedModel() });
+          const plan = await postJson('/api/dream/plan', { 
+            model: model || getSelectedModel(), 
+            customInstruction: customInstruction || null 
+          });
           if (plan && plan.error) {
             diaryOut.textContent = plan.error || 'Error';
             return plan;
