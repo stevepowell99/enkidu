@@ -3,7 +3,7 @@ title: Personal recipes — cookable list
 id: cbe0e17af558fa77b75f37ca
 created: 2025-12-24T18:17:14Z
 tags: recipes, favourites, easy-recipes, bread, desserts, mains, to-make
-importance: 2
+importance: 3
 source_refs:
   - memories/sources/verbatim/558f74d1b7ab_20251224t181658z-recipes.md
   - memories/sources/verbatim/558f74d1b7ab_20251224t181535z-recipes.md
