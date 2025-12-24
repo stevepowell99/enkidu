@@ -406,6 +406,12 @@ async function workCore({ prompt, model, history }) {
   if (memChunks.length) userParts.push("Relevant memories (may be incomplete):\n\n" + memChunks.join("\n\n"));
   userParts.push("User prompt:\n\n" + prompt);
 
+  const usedMemories = top.map(({ entry }) => ({
+    title: entry.title || "",
+    path: entry.path || "",
+    tags: entry.tags || [],
+  }));
+
   const messages = [
     { role: "system", content: instruction },
     ...normaliseHistory(history),
@@ -417,7 +423,7 @@ async function workCore({ prompt, model, history }) {
 
   // If the model requests a web fetch, do ONE fetch then ask again with the fetched text.
   const url = extractWebFetchUrl(raw1);
-  if (!url) return raw1;
+  if (!url) return { raw: raw1, usedMemories };
 
   const webText = await fetchWebText(url);
   const messages2 = [
@@ -438,9 +444,12 @@ async function workCore({ prompt, model, history }) {
   const raw2 = await openaiChat(messages2, { model });
   const url2 = extractWebFetchUrl(raw2);
   if (url2) {
-    return "I tried one web fetch already, but you requested another. Please answer using the fetched content I provided.";
+    return {
+      raw: "I tried one web fetch already, but you requested another. Please answer using the fetched content I provided.",
+      usedMemories,
+    };
   }
-  return raw2;
+  return { raw: raw2, usedMemories };
 }
 
 async function openaiChat(messages, opts = {}) {
@@ -547,7 +556,7 @@ async function cmdWork(args) {
   const prompt = String(args._[1] || "").trim();
   if (!prompt) throw new Error('Usage: node enkidu.js work \"your prompt\"');
 
-  const raw = await workCore({ prompt, model: "", history: [] });
+  const { raw } = await workCore({ prompt, model: "", history: [] });
   const { answer, capture } = splitAnswerAndCapture(raw);
   await writeAutoCaptureToInbox(capture);
   process.stdout.write(String(answer).trim() + "\n");
@@ -785,10 +794,10 @@ async function cmdServe(args) {
         const model = String(data.model || "").trim();
         const history = data.history;
         if (!prompt) return sendJson(res, 400, { error: "Missing prompt" });
-        const raw = await workCore({ prompt, model, history });
+        const { raw, usedMemories } = await workCore({ prompt, model, history });
         const { answer, capture } = splitAnswerAndCapture(raw);
         const capturePath = await writeAutoCaptureToInbox(capture);
-        return sendJson(res, 200, { answer, capturePath });
+        return sendJson(res, 200, { answer, capturePath, usedMemories });
       }
 
       if (req.method === "POST" && u.pathname === "/api/capture") {
@@ -967,6 +976,10 @@ function renderHtml() {
                 <button id=\"clearHistoryBtn\" class=\"btn btn-outline-secondary\">Start over</button>
               </div>
               <div id=\"workStatus\" class=\"mt-2 small text-muted\"></div>
+              <details class=\"mt-2\">
+                <summary class=\"small text-muted\">Used memories</summary>
+                <div id=\"usedMemories\" class=\"small mt-1\"></div>
+              </details>
             </div>
           </div>
         </div>
@@ -1108,6 +1121,7 @@ function renderHtml() {
       const clearHistoryBtn = document.getElementById('clearHistoryBtn');
       const chatHistoryEl = document.getElementById('chatHistory');
       const workStatus = document.getElementById('workStatus');
+      const usedMemoriesEl = document.getElementById('usedMemories');
 
       // Persist model selection.
       const savedModel = localStorage.getItem('enkidu.workModel') || '';
@@ -1200,6 +1214,18 @@ function renderHtml() {
           autoCapOut.textContent = '';
         }
 
+        // Show which memories were included for retrieval.
+        if (resp && Array.isArray(resp.usedMemories)) {
+          const ms = resp.usedMemories;
+          if (!ms.length) {
+            usedMemoriesEl.textContent = '(none)';
+          } else {
+            usedMemoriesEl.innerHTML = ms
+              .map(m => '<div><code>' + escapeHtml(m.path || '') + '</code> — ' + escapeHtml(m.title || '') + '</div>')
+              .join('');
+          }
+        }
+
         if (resp.answer) {
           const h = loadHistory();
           h.push({ role: 'user', content: workPrompt.value });
@@ -1216,6 +1242,7 @@ function renderHtml() {
         workPrompt.value = '';
         workStatus.textContent = '';
         autoCapOut.textContent = '';
+        usedMemoriesEl.textContent = '';
       };
 
       const capBtn = document.getElementById('capBtn');
