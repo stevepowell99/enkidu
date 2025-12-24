@@ -1699,7 +1699,6 @@ function renderHtml() {
         try {
           resp = await postJson('/api/work', { prompt: workPrompt.value, model, history, sources, runNow: !!runNow });
         } finally {
-          removeTypingIndicator();
           workBtn.disabled = false;
           workBtnNow.disabled = false;
         }
@@ -1738,10 +1737,12 @@ function renderHtml() {
           h.push({ role: 'assistant', content: 'Error:\\n' + String(resp.error) });
           saveHistory(h.slice(-20));
           renderHistory();
+          removeTypingIndicator();
           return;
         }
 
         if (resp.answer) {
+          // Update retrieval panels first, then append the assistant message.
           const h = loadHistory();
           h.push({ role: 'user', content: workPrompt.value });
           h.push({ role: 'assistant', content: resp.answer });
@@ -1749,6 +1750,8 @@ function renderHtml() {
           renderHistory();
           workPrompt.value = '';
         }
+
+        removeTypingIndicator();
       }
 
       workBtn.onclick = async () => doWork(false);
