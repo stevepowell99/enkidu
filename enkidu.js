@@ -714,10 +714,33 @@ async function writeIndex(entries) {
 }
 
 async function loadIndex() {
+  await ensureDirs();
+  // Keep the generated index in sync with manual edits to memory .md files.
+  // Root cause fixed: if a user edits tags/front matter in VS Code, `_index.json` can become stale
+  // and Work may keep using outdated tags (e.g. treating a domain note as a global preference).
   if (!fs.existsSync(INDEX_FILE)) {
     const entries = await buildIndex();
     await writeIndex(entries);
+    return JSON.parse(await readFileUtf8(INDEX_FILE));
   }
+
+  try {
+    const idxStat = await fsp.stat(INDEX_FILE);
+    const mdFiles = await iterMemoryMarkdownFiles(); // only *.md under memories/
+    let newestMs = 0;
+    for (const p of mdFiles) {
+      const st = await fsp.stat(p);
+      if (st.mtimeMs > newestMs) newestMs = st.mtimeMs;
+    }
+    // Small tolerance to avoid flapping on coarse timestamps.
+    if (newestMs > (idxStat.mtimeMs + 500)) {
+      const entries = await buildIndex();
+      await writeIndex(entries);
+    }
+  } catch {
+    // If anything odd happens, fall back to whatever index is on disk.
+  }
+
   return JSON.parse(await readFileUtf8(INDEX_FILE));
 }
 
