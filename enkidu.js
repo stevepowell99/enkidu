@@ -24,6 +24,8 @@ const REPO_ROOT = __dirname;
 const MEMORIES_DIR = path.join(REPO_ROOT, "memories");
 const INDEX_FILE = path.join(MEMORIES_DIR, "_index.json");
 const EMBEDDINGS_FILE = path.join(MEMORIES_DIR, "_embeddings.json");
+const SESSIONS_DIR = path.join(MEMORIES_DIR, "sessions");
+const SESSION_LOG_FILE = path.join(SESSIONS_DIR, "recent.jsonl");
 const INSTRUCTIONS_DIR = path.join(REPO_ROOT, "instructions");
 const WORK_INSTRUCTION_FILE = path.join(INSTRUCTIONS_DIR, "work.md");
 const DREAM_INSTRUCTION_FILE = path.join(INSTRUCTIONS_DIR, "dream.md");
@@ -88,8 +90,47 @@ function cosineSim(a, b) {
   return dot(a, b) / (l2norm(a) * l2norm(b));
 }
 
+async function appendSessionEvent(role, content, meta = {}) {
+  await ensureDirs();
+  const evt = {
+    ts: nowIso(),
+    role: String(role || ""),
+    content: String(content || ""),
+    ...meta,
+  };
+  await fsp.appendFile(SESSION_LOG_FILE, JSON.stringify(evt) + "\n", "utf8");
+}
+
+async function loadRecentSessionEvents(maxN = 30) {
+  if (!fs.existsSync(SESSION_LOG_FILE)) return [];
+  const raw = await readFileUtf8(SESSION_LOG_FILE);
+  const lines = raw.split(/\r?\n/).filter(Boolean);
+  const tail = lines.slice(-maxN);
+  const out = [];
+  for (const line of tail) {
+    try {
+      const obj = JSON.parse(line);
+      if (obj && (obj.role === "user" || obj.role === "assistant") && String(obj.content || "").trim()) out.push(obj);
+    } catch {
+      // ignore bad lines
+    }
+  }
+  return out;
+}
+
+function formatRecentSessionForPrompt(events) {
+  // Keep it concise and readable; this is "episodic memory".
+  return events
+    .map((e) => {
+      const role = e.role === "user" ? "User" : "Assistant";
+      return `${role}: ${String(e.content || "").trim()}`;
+    })
+    .join("\n");
+}
+
 async function ensureDirs() {
   await fsp.mkdir(MEMORIES_DIR, { recursive: true });
+  await fsp.mkdir(SESSIONS_DIR, { recursive: true });
   await fsp.mkdir(INSTRUCTIONS_DIR, { recursive: true });
   for (const d of MEMORY_FOLDERS) await fsp.mkdir(d, { recursive: true });
 }
@@ -332,6 +373,88 @@ async function cmdEmbed(args = {}) {
   console.log(`Embeddings updated: ${updated} file(s). Cache: ${safeRelPath(EMBEDDINGS_FILE)}`);
 }
 
+async function retrieveTopMemoriesByEmbeddings(queries, topN) {
+  const idx = await loadIndex();
+  const entries = idx.entries || [];
+  const cache = await loadEmbeddingsCache();
+  if (!cache || !cache.items) return null;
+
+  const qs = (Array.isArray(queries) ? queries : [String(queries || "")]).map((s) => String(s || "").trim()).filter(Boolean);
+  if (!qs.length) return [];
+
+  const qVecs = [];
+  for (const q of qs) qVecs.push(await openaiEmbed(q, { model: cache.model || DEFAULT_EMBEDDING_MODEL }));
+
+  const scored = [];
+  for (const e of entries) {
+    const rel = String(e.path || "");
+    const abs = path.join(REPO_ROOT, rel);
+    if (!fs.existsSync(abs)) continue;
+    const item = cache.items[rel];
+    if (!item || !Array.isArray(item.vector)) continue;
+    let best = -1;
+    for (const qv of qVecs) best = Math.max(best, cosineSim(qv, item.vector));
+    scored.push([best, e]);
+  }
+  scored.sort((a, b) => b[0] - a[0]);
+
+  const picked = scored.slice(0, topN).map((x) => x[1]);
+  const out = [];
+  for (const e of picked) {
+    const p = path.join(REPO_ROOT, e.path);
+    const text = await readFileUtf8(p);
+    out.push({ entry: e, text });
+  }
+  return out;
+}
+
+function heuristicRoute(prompt) {
+  const p = String(prompt || "").toLowerCase();
+  const words = p.match(/[a-z0-9']+/g) || [];
+
+  const recencyHints = [
+    "recently",
+    "last time",
+    "catch me up",
+    "where were we",
+    "what have we been talking",
+    "recap",
+    "summary",
+    "continue",
+  ];
+  const needRecency = recencyHints.some((h) => p.includes(h));
+
+  const vagueHints = ["something", "anything", "recommend", "suggest", "find me", "i would like", "a poem"];
+  const needExpansion = (words.length <= 8 && vagueHints.some((h) => p.includes(h))) || p.includes("i would like");
+
+  return {
+    needRecency,
+    needExpansion,
+  };
+}
+
+async function expandQueriesWithAI(prompt, model) {
+  // Only used when heuristicRoute says the prompt is vague.
+  const system = [
+    "You expand a user's request into multiple retrieval queries.",
+    "Return ONLY valid JSON of the form: {\"queries\": [\"...\", \"...\", ...]}",
+    "Rules:",
+    "- 3 to 6 queries",
+    "- short phrases, not full sentences",
+    "- include likely synonyms and related terms",
+  ].join("\n");
+
+  const messages = [
+    { role: "system", content: system },
+    { role: "user", content: String(prompt || "") },
+  ];
+
+  const raw = await openaiChat(messages, { model });
+  const parsed = safeJsonParse(raw);
+  const qs = parsed && Array.isArray(parsed.queries) ? parsed.queries : [];
+  return qs.map((s) => String(s || "").trim()).filter(Boolean).slice(0, 6);
+}
+
 async function retrieveTopMemories(prompt, topN) {
   const idx = await loadIndex();
   const entries = idx.entries || [];
@@ -339,26 +462,8 @@ async function retrieveTopMemories(prompt, topN) {
   // If embeddings exist, use cosine similarity ranking.
   const cache = await loadEmbeddingsCache();
   if (cache && cache.items) {
-    const qVec = await openaiEmbed(String(prompt || ""), { model: cache.model || DEFAULT_EMBEDDING_MODEL });
-    const scored = [];
-    for (const e of entries) {
-      const rel = String(e.path || "");
-      const abs = path.join(REPO_ROOT, rel);
-      if (!fs.existsSync(abs)) continue;
-      const item = cache.items[rel];
-      if (!item || !Array.isArray(item.vector)) continue;
-      const sim = cosineSim(qVec, item.vector);
-      scored.push([sim, e]);
-    }
-    scored.sort((a, b) => b[0] - a[0]);
-    const picked = scored.slice(0, topN).map((x) => x[1]);
-    const out = [];
-    for (const e of picked) {
-      const p = path.join(REPO_ROOT, e.path);
-      const text = await readFileUtf8(p);
-      out.push({ entry: e, text });
-    }
-    return out;
+    const out = await retrieveTopMemoriesByEmbeddings([String(prompt || "")], topN);
+    if (out) return out;
   }
 
   // Fallback: keyword overlap scoring.
@@ -521,7 +626,16 @@ function normaliseHistory(history) {
 
 async function workCore({ prompt, model, history, sources }) {
   const instruction = await readInstruction(WORK_INSTRUCTION_FILE);
-  const top = await retrieveTopMemories(prompt, 5);
+  const route = heuristicRoute(prompt);
+
+  // Recency (episodic memory): always available across sessions.
+  const recentEvents = route.needRecency ? await loadRecentSessionEvents(30) : [];
+
+  // Heuristic-first: expand only when prompt is vague.
+  const queries = route.needExpansion ? await expandQueriesWithAI(prompt, model) : [prompt];
+
+  // Semantic retrieval: embeddings if available, otherwise keyword fallback inside retrieveTopMemories().
+  const top = (await retrieveTopMemoriesByEmbeddings(queries, 5)) ?? (await retrieveTopMemories(prompt, 5));
 
   const memChunks = top.map(({ entry, text }) => {
     return [
@@ -534,6 +648,9 @@ async function workCore({ prompt, model, history, sources }) {
   });
 
   const userParts = [];
+  if (recentEvents.length) {
+    userParts.push("Recent conversation (episodic memory):\n\n" + formatRecentSessionForPrompt(recentEvents));
+  }
   if (memChunks.length) userParts.push("Relevant memories (may be incomplete):\n\n" + memChunks.join("\n\n"));
 
   // Optional read-only source excerpts (provided by UI; not stored server-side).
@@ -710,6 +827,8 @@ async function cmdWork(args) {
   const { raw } = await workCore({ prompt, model: "", history: [] });
   const { answer, capture } = splitAnswerAndCapture(raw);
   await writeAutoCaptureToInbox(capture);
+  await appendSessionEvent("user", prompt);
+  await appendSessionEvent("assistant", String(answer || "").trim());
   process.stdout.write(String(answer).trim() + "\n");
 }
 
@@ -950,6 +1069,8 @@ async function cmdServe(args) {
         const { raw, usedMemories } = await workCore({ prompt, model, history, sources });
         const { answer, capture } = splitAnswerAndCapture(raw);
         const capturePath = await writeAutoCaptureToInbox(capture);
+        await appendSessionEvent("user", prompt);
+        await appendSessionEvent("assistant", String(answer || "").trim());
         return sendJson(res, 200, { answer, capturePath, usedMemories });
       }
 
