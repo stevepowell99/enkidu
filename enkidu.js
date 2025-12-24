@@ -1079,12 +1079,7 @@ function heuristicRoute(prompt) {
   const needRecency = recencyHints.some((h) => p.includes(h));
 
   const vagueHints = ["something", "anything", "recommend", "suggest", "find me", "i would like", "a poem"];
-  // Expansion is expensive; keep it heuristic-first. But some prompts are long and still vague (e.g. food "bare minimum").
-  const foodHints = ["eat", "cook", "recipe", "fridge", "ingredients", "dinner", "lunch", "breakfast", "snack", "meal"];
-  const foodVagueHints = ["bare minimum", "barest minimum", "minimum", "something", "anything", "what can i make", "what should i make", "quick"];
-  const isVague = vagueHints.some((h) => p.includes(h)) || p.includes("i would like");
-  const isVagueFood = foodHints.some((h) => p.includes(h)) && foodVagueHints.some((h) => p.includes(h));
-  const needExpansion = (words.length <= 8 && isVague) || isVagueFood || p.includes("i would like");
+  const needExpansion = (words.length <= 8 && vagueHints.some((h) => p.includes(h))) || p.includes("i would like");
 
   return {
     needRecency,
