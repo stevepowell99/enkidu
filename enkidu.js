@@ -309,7 +309,10 @@ function normaliseSourcesMeta(meta) {
   const name = toSingleLine(meta?.name || "", 120);
   const tags = mergeTagsStrings("", meta?.tags || "");
   const context = toSingleLine(meta?.context || "", 300);
-  return { name, tags, context };
+  const dd = String(meta?.default_dest || meta?.dest || "auto").toLowerCase().trim();
+  const allowed = new Set(["auto", "inbox", "people", "projects", "howto"]);
+  const default_dest = allowed.has(dd) ? dd : "auto";
+  return { name, tags, context, default_dest };
 }
 
 function dot(a, b) {
@@ -1923,7 +1926,8 @@ async function ingestSourcesBatch(files, model, meta = {}) {
     const parsed = safeJsonParse(raw);
     if (!parsed) continue;
 
-    const dest = String(parsed.dest || "inbox").toLowerCase();
+    const modelDest = String(parsed.dest || "inbox").toLowerCase();
+    const dest = sm.default_dest && sm.default_dest !== "auto" ? sm.default_dest : modelDest;
     const allowed = new Set(["inbox", "people", "projects", "howto"]);
     if (!allowed.has(dest)) continue;
 
@@ -2029,7 +2033,8 @@ async function ingestSourcesBatchSupabase(files, model, meta = {}) {
     const parsed = safeJsonParse(raw);
     if (!parsed) continue;
 
-    const dest = String(parsed.dest || "inbox").toLowerCase();
+    const modelDest = String(parsed.dest || "inbox").toLowerCase();
+    const dest = sm.default_dest && sm.default_dest !== "auto" ? sm.default_dest : modelDest;
     const allowed = new Set(["inbox", "people", "projects", "howto"]);
     if (!allowed.has(dest)) continue;
 

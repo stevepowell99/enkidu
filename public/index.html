@@ -175,6 +175,23 @@
                   <input id="sourcesMetaContext" class="form-control" placeholder="one-line description (helps tagging + filing)"/>
                 </div>
               </div>
+              <div class="row g-2 mt-2">
+                <div class="col-12 col-lg-4">
+                  <label class="form-label small text-muted mb-1">Default folder</label>
+                  <select id="sourcesMetaDest" class="form-select">
+                    <option value="auto" selected>auto (model decides)</option>
+                    <option value="inbox">inbox</option>
+                    <option value="projects">projects</option>
+                    <option value="howto">howto</option>
+                    <option value="people">people</option>
+                  </select>
+                </div>
+                <div class="col-12 col-lg-8">
+                  <div class="small text-muted" style="padding-top: 2.0rem;">
+                    Tip: set this if the model keeps filing everything in the wrong place.
+                  </div>
+                </div>
+              </div>
               <div class="row g-2 align-items-end mt-1">
                 <div class="col-12 col-lg-8">
                   <input id="sourcesFolder" class="form-control" type="file" webkitdirectory multiple />
@@ -304,6 +321,7 @@
       const sourcesMetaNameEl = document.getElementById('sourcesMetaName');
       const sourcesMetaTagsEl = document.getElementById('sourcesMetaTags');
       const sourcesMetaContextEl = document.getElementById('sourcesMetaContext');
+      const sourcesMetaDestEl = document.getElementById('sourcesMetaDest');
 
       // Persist sources metadata (browser-local).
       function loadSourcesMeta() {
@@ -311,20 +329,28 @@
           name: localStorage.getItem('enkidu.sourcesMeta.name') || '',
           tags: localStorage.getItem('enkidu.sourcesMeta.tags') || '',
           context: localStorage.getItem('enkidu.sourcesMeta.context') || '',
+          dest: localStorage.getItem('enkidu.sourcesMeta.dest') || 'auto',
         };
       }
       function saveSourcesMeta(meta) {
         localStorage.setItem('enkidu.sourcesMeta.name', meta.name || '');
         localStorage.setItem('enkidu.sourcesMeta.tags', meta.tags || '');
         localStorage.setItem('enkidu.sourcesMeta.context', meta.context || '');
+        localStorage.setItem('enkidu.sourcesMeta.dest', meta.dest || 'auto');
       }
       const _meta0 = loadSourcesMeta();
       sourcesMetaNameEl.value = _meta0.name;
       sourcesMetaTagsEl.value = _meta0.tags;
       sourcesMetaContextEl.value = _meta0.context;
-      [sourcesMetaNameEl, sourcesMetaTagsEl, sourcesMetaContextEl].forEach(el => {
+      sourcesMetaDestEl.value = _meta0.dest || 'auto';
+      [sourcesMetaNameEl, sourcesMetaTagsEl, sourcesMetaContextEl, sourcesMetaDestEl].forEach(el => {
         el.addEventListener('input', () => {
-          saveSourcesMeta({ name: sourcesMetaNameEl.value, tags: sourcesMetaTagsEl.value, context: sourcesMetaContextEl.value });
+          saveSourcesMeta({
+            name: sourcesMetaNameEl.value,
+            tags: sourcesMetaTagsEl.value,
+            context: sourcesMetaContextEl.value,
+            dest: sourcesMetaDestEl.value,
+          });
         });
       });
 
@@ -333,6 +359,7 @@
           name: (sourcesMetaNameEl.value || '').trim(),
           tags: (sourcesMetaTagsEl.value || '').trim(),
           context: (sourcesMetaContextEl.value || '').trim(),
+          default_dest: (sourcesMetaDestEl.value || 'auto').trim(),
         };
       }
 

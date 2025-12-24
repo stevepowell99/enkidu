@@ -8,7 +8,7 @@ Hard rules:
 
 Input:
 - You will be given: original_path, source_content, and optionally source_set metadata.
-- source_set schema (if present): { "name": "...", "tags": "comma,separated,tags", "context": "one line about what these files are" }
+- source_set schema (if present): { "name": "...", "tags": "comma,separated,tags", "context": "one line about what these files are", "default_dest": "auto|inbox|people|projects|howto" }
 
 Output JSON schema:
 {
@@ -24,6 +24,7 @@ Guidance:
 - If the file is academic notes, default to dest="projects" or "howto" depending on whether it is project-specific or general method.
 - Put stable preferences/habits into memories (importance 2–3). One-off details stay importance 0–1.
 - Use source_set metadata (name/tags/context) to improve tagging and filing decisions.
+- If source_set.default_dest is provided and not "auto", you MUST set dest to that value.
 - In summary_md, include:
   - a 3–8 bullet summary
   - a short \"Key quotes\" section only if there are quotes worth preserving
