@@ -24,12 +24,18 @@ After you answer, decide if there is anything worth saving as a memory note.
 
 Output format:
 - Write your normal answer first (human-readable).
-- Optionally, on a new line at the very end, add:
+- Then, on a new line at the very end, write exactly:
 
-`===CAPTURE=== {"title":"...","tags":"tag1,tag2","text":"..."}`
+`===CAPTURE=== <json-or-null>`
+
+Where `<json-or-null>` is either:
+- `null` (if nothing should be captured), or
+- a single JSON object like:
+
+`{"title":"...","tags":"tag1,tag2","text":"..."}`
 
 Rules:
-- Only include `===CAPTURE=== ...` if you actually want to capture something.
+- Keep it on ONE line.
 - Keep `text` short and factual (what to remember).
 - Only capture information that seems stable/useful later (preferences, facts, decisions).
 

@@ -940,7 +940,7 @@ function renderHtml() {
               </div>
               <div class=\"d-flex gap-2 flex-wrap\">
                 <button id=\"workBtn\" class=\"btn btn-primary\">Run</button>
-                <button id=\"clearHistoryBtn\" class=\"btn btn-outline-secondary\">Clear history</button>
+                <button id=\"clearHistoryBtn\" class=\"btn btn-outline-secondary\">Start over</button>
               </div>
               <div id=\"workStatus\" class=\"mt-2 small text-muted\"></div>
             </div>
@@ -1189,6 +1189,9 @@ function renderHtml() {
       clearHistoryBtn.onclick = () => {
         saveHistory([]);
         renderHistory();
+        workPrompt.value = '';
+        workStatus.textContent = '';
+        autoCapOut.textContent = '';
       };
 
       const capBtn = document.getElementById('capBtn');
