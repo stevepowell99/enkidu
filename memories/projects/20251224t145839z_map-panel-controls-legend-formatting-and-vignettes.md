@@ -7,6 +7,7 @@ importance: 2
 source: sources_ingest
 source_ref: memories/sources/verbatim/fd6458824b2d_110-map-panel-map-panel.md
 original_path: content/999 Causal Map App/110 Map Panel ((map-panel)).md
+spaced-rep-priority: 4
 ---
 
 - Interactive map panel presents causal relationships as a draggable network: drag nodes, click links to edit, and drop one factor onto another to create new links.

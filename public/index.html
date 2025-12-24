@@ -131,20 +131,6 @@
                 <button id="workBtnNow" class="btn btn-outline-primary">RunNow</button>
                 <button id="clearHistoryBtn" class="btn btn-outline-secondary">Start over</button>
               </div>
-              <div id="spacedRepPanel" class="mt-2 p-2 border rounded bg-light" style="display:none;">
-                <div class="small text-muted mb-1">Spaced repetition: select your answer</div>
-                <div class="d-flex gap-2">
-                  <div class="d-flex flex-column gap-1">
-                    <button class="btn btn-sm btn-outline-primary" data-sr-answer="A" style="width: 40px;">A</button>
-                    <button class="btn btn-sm btn-outline-primary" data-sr-answer="B" style="width: 40px;">B</button>
-                    <button class="btn btn-sm btn-outline-primary" data-sr-answer="C" style="width: 40px;">C</button>
-                    <button class="btn btn-sm btn-outline-primary" data-sr-answer="D" style="width: 40px;">D</button>
-                    <button class="btn btn-sm btn-outline-primary" data-sr-answer="E" style="width: 40px;">E</button>
-                  </div>
-                  <div class="flex-grow-1"></div>
-                  <button id="srSkipBtn" class="btn btn-sm btn-outline-secondary align-self-start">Skip</button>
-                </div>
-              </div>
               <div id="workStatus" class="mt-2 small text-muted"></div>
               <div id="autoCaptureStatus" class="small text-muted"></div>
               <details class="mt-2">
@@ -879,8 +865,6 @@
       };
 
       // Spaced repetition
-      const spacedRepPanelEl = document.getElementById('spacedRepPanel');
-      const srSkipBtn = document.getElementById('srSkipBtn');
       let currentSrQuestion = null;
 
       async function doSpacedRep() {
@@ -902,7 +886,7 @@
           if (!resp || !resp.question) {
             workStatus.textContent = 'No spaced repetition items available.';
             const h = loadHistory();
-            h.push({ role: 'assistant', content: 'No spaced repetition items found. Tag memories with "spaced-rep: 1-3" to add them.' });
+            h.push({ role: 'assistant', content: 'No spaced repetition items found. Tag memories with "spaced-rep: 1-3" or set importance: 2-3.' });
             saveHistory(h.slice(-20));
             renderHistory();
             return;
@@ -910,30 +894,68 @@
 
           currentSrQuestion = resp;
           
+          // Add question to history with inline A-E buttons.
           const h = loadHistory();
           h.push({ role: 'assistant', content: '[Spaced Rep]\n\n' + resp.question });
           saveHistory(h.slice(-20));
           renderHistory();
           
-          spacedRepPanelEl.style.display = '';
-          workStatus.textContent = 'Rate your answer (1=wrong, 5=perfect)';
+          // Create inline button row after the question.
+          const lastMsg = chatHistoryEl.lastElementChild;
+          if (lastMsg) {
+            const btnRow = document.createElement('div');
+            btnRow.className = 'd-flex gap-2 mt-2';
+            btnRow.id = 'srInlineButtons';
+            btnRow.innerHTML = `
+              <button class="btn btn-sm btn-outline-primary" data-sr-inline="A">A</button>
+              <button class="btn btn-sm btn-outline-primary" data-sr-inline="B">B</button>
+              <button class="btn btn-sm btn-outline-primary" data-sr-inline="C">C</button>
+              <button class="btn btn-sm btn-outline-primary" data-sr-inline="D">D</button>
+              <button class="btn btn-sm btn-outline-primary" data-sr-inline="E">E</button>
+              <button class="btn btn-sm btn-outline-secondary ms-auto" data-sr-inline="skip">Skip</button>
+            `;
+            lastMsg.querySelector('div').appendChild(btnRow);
+            
+            // Attach handlers.
+            btnRow.querySelectorAll('[data-sr-inline]').forEach(btn => {
+              btn.onclick = () => {
+                const ans = btn.getAttribute('data-sr-inline');
+                if (ans === 'skip') {
+                  btnRow.remove();
+                  currentSrQuestion = null;
+                  workStatus.textContent = 'Skipped.';
+                } else {
+                  submitSrAnswer(ans);
+                }
+              };
+            });
+          }
+          
+          workStatus.textContent = 'Select your answer (A-E)';
         } finally {
           workBtn.disabled = false;
           workBtnNow.disabled = false;
         }
       }
 
-      async function submitSrAnswer(rating) {
+      async function submitSrAnswer(userAnswer) {
         if (!currentSrQuestion) return;
         
-        spacedRepPanelEl.style.display = 'none';
+        // Remove inline buttons.
+        const btnRow = document.getElementById('srInlineButtons');
+        if (btnRow) btnRow.remove();
+        
         workBtn.disabled = true;
         workBtnNow.disabled = true;
         workStatus.textContent = 'Recording answer...';
         
-        // Map A-E to 1-5 for internal priority tracking.
-        const ratingMap = { 'A': 1, 'B': 2, 'C': 3, 'D': 4, 'E': 5 };
-        const numericRating = ratingMap[String(rating).toUpperCase()] || 3;
+        // Extract correct answer from question (format: "Correct answer: B").
+        const correctMatch = String(currentSrQuestion.question || '').match(/Correct answer:\s*([A-E])/i);
+        const correctAnswer = correctMatch ? correctMatch[1].toUpperCase() : null;
+        const isCorrect = correctAnswer && userAnswer.toUpperCase() === correctAnswer;
+        
+        // Rating: correct → 5 (decrease priority), wrong → 1 (increase priority).
+        const numericRating = isCorrect ? 5 : 1;
         
         try {
           const resp = await postJson('/api/spaced-rep/submit', {
@@ -946,13 +968,14 @@
             return;
           }
           
+          const result = isCorrect ? '✓ Correct' : `✗ Wrong (correct: ${correctAnswer || '?'})`;
           const feedback = resp && resp.newPriority !== undefined
-            ? `Recorded: ${rating}. Priority: ${resp.oldPriority || 0} → ${resp.newPriority}.`
-            : `Recorded: ${rating}.`;
+            ? `${result}. Priority: ${resp.oldPriority || 0} → ${resp.newPriority}.`
+            : `${result}.`;
           
           workStatus.textContent = feedback;
           const h = loadHistory();
-          h.push({ role: 'user', content: `[SR Answer: ${rating}]` });
+          h.push({ role: 'user', content: `[SR Answer: ${userAnswer}]` });
           h.push({ role: 'assistant', content: feedback });
           saveHistory(h.slice(-20));
           renderHistory();
@@ -963,16 +986,6 @@
           workBtnNow.disabled = false;
         }
       }
-
-      document.querySelectorAll('[data-sr-answer]').forEach(btn => {
-        btn.onclick = () => submitSrAnswer(btn.getAttribute('data-sr-answer'));
-      });
-
-      srSkipBtn.onclick = () => {
-        spacedRepPanelEl.style.display = 'none';
-        currentSrQuestion = null;
-        workStatus.textContent = 'Skipped.';
-      };
 
       const dreamBtn = document.getElementById('dreamBtn');
       const refreshDiaryBtn = document.getElementById('refreshDiaryBtn');

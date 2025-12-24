@@ -24,6 +24,13 @@ If `memories/inbox/` is non-empty, this is your most basic task:
 - Merge near-duplicates, and delete redundant copies where safe.
 - Leave `memories/inbox/` empty if you can.
 
+**If inbox is empty and there is no user directive**: do NOT reorganise for the sake of it. Only act if:
+- There are obvious duplicates (exact or near) in the duplicate report
+- There is a clear problem (e.g. mis-tagged global preferences, badly filed notes)
+- User has given a specific directive (via customInstruction)
+
+Otherwise, return empty ops and a diary entry like "Inbox empty, no obvious issues, no action taken."
+
 ### Autonomy (no user feedback required)
 Do NOT ask the user for guidance during Dream.
 - Make best-effort choices and proceed.
