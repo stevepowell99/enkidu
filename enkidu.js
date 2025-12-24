@@ -1545,24 +1545,31 @@ async function cmdDream(args = {}) {
   const instruction = await readInstruction(DREAM_INSTRUCTION_FILE);
   const model = String(args.model || "").trim();
 
-  // Provide the model with full file contents it is allowed to operate on.
+  // IMPORTANT: Do NOT send full contents of all memories (can exceed model context limits).
+  // We do a 2-step flow:
+  // 1) Send a compact catalog (metadata + previews) and ask which files to read.
+  // 2) Provide full content only for that selected subset, then ask for ops+diary.
+
+  const DREAM_CATALOG_MAX = Math.max(200, Math.min(5000, Number(process.env.ENKIDU_DREAM_CATALOG_MAX || 2000)));
+  const DREAM_READ_MAX = Math.max(10, Math.min(120, Number(process.env.ENKIDU_DREAM_READ_MAX || 40)));
+
   const idx = await loadIndex();
   const entries = idx.entries || [];
 
-  const files = [];
-  for (const e of entries) {
-    const rel = String(e.path || "");
-    const abs = path.join(REPO_ROOT, rel);
-    assertWithinMemories(abs);
-    if (!fs.existsSync(abs)) continue;
-    const content = await readFileUtf8(abs);
-    files.push({
+  // Catalog: metadata only (no full content).
+  const catalog = [];
+  for (const e of entries.slice(0, DREAM_CATALOG_MAX)) {
+    const rel = String(e?.path || "").replaceAll("\\", "/");
+    if (!rel) continue;
+    if (!rel.toLowerCase().endsWith(".md")) continue;
+    catalog.push({
       path: rel,
-      title: e.title,
-      tags: e.tags,
-      created: e.created,
-      updated: e.updated,
-      content,
+      title: e.title || "",
+      tags: e.tags || [],
+      importance: Number.isFinite(Number(e.importance)) ? Number(e.importance) : 0,
+      created: e.created || "",
+      updated: e.updated || "",
+      preview: e.preview || "",
     });
   }
 
@@ -1585,13 +1592,81 @@ async function cmdDream(args = {}) {
     instructionFiles.push({ path: rel, content });
   }
 
-  const context = {
+  // ---- Step 1: ask which files to read fully ----
+  const step1 = {
     now: nowIso(),
     writable_roots: ["memories/", "instructions/"],
-    note_count: files.length,
-    files,
+    note_count_total: entries.length,
+    note_count_included_in_catalog: catalog.length,
+    note_catalog_truncated: entries.length > catalog.length,
+    catalog,
     duplicate_report,
     instructions: instructionFiles,
+    output_contract: {
+      want_read: ["memories/path.md", "instructions/work.md"],
+      note: "one short sentence why you want these files",
+    },
+    constraints: {
+      max_files_to_read: DREAM_READ_MAX,
+      do_not_read_or_modify: ["memories/sources/verbatim/* (read-only)"],
+    },
+  };
+
+  const messages1 = [
+    { role: "system", content: instruction },
+    {
+      role: "user",
+      content:
+        "You are running DREAM (step 1/2).\n\n" +
+        "Pick up to max_files_to_read files you need to read fully to make good edits.\n" +
+        "Return ONLY valid JSON matching output_contract.\n\n" +
+        JSON.stringify(step1, null, 2),
+    },
+  ];
+
+  const raw1 = await openaiChat(messages1, { model });
+  const parsed1 = safeJsonParse(raw1);
+  const wantReadRaw = Array.isArray(parsed1?.want_read) ? parsed1.want_read : [];
+  const wantRead = [];
+  const seen = new Set();
+  for (const p of wantReadRaw) {
+    if (wantRead.length >= DREAM_READ_MAX) break;
+    const rel = String(p || "").replaceAll("\\", "/").trim();
+    if (!rel) continue;
+    if (seen.has(rel)) continue;
+    // Allow reading memories/*.md and instructions/*.md only.
+    if (!(rel.toLowerCase().startsWith("memories/") || rel.toLowerCase().startsWith("instructions/"))) continue;
+    // Never provide verbatim sources content to dream (read-only).
+    if (rel.toLowerCase().startsWith("memories/sources/verbatim/")) continue;
+    const abs = path.join(REPO_ROOT, rel);
+    assertWithinWritableRoots(abs);
+    // Don't allow reading protected generated files.
+    try {
+      assertNotProtectedWritable(abs);
+    } catch {
+      continue;
+    }
+    if (!fs.existsSync(abs)) continue;
+    seen.add(rel);
+    wantRead.push(rel);
+  }
+
+  const selected_files = [];
+  for (const rel of wantRead) {
+    const abs = path.join(REPO_ROOT, rel);
+    const content = await readFileUtf8(abs);
+    selected_files.push({ path: rel, content });
+  }
+
+  // ---- Step 2: perform operations using selected full contents ----
+  const step2 = {
+    now: nowIso(),
+    writable_roots: ["memories/", "instructions/"],
+    note_count_total: entries.length,
+    note_catalog_truncated: entries.length > catalog.length,
+    catalog,
+    duplicate_report,
+    selected_files,
     output_contract: {
       ops: [
         { op: "mkdir", path: "memories/someFolder" },
@@ -1603,18 +1678,19 @@ async function cmdDream(args = {}) {
     },
   };
 
-  const messages = [
+  const messages2 = [
     { role: "system", content: instruction },
     {
       role: "user",
       content:
-        "You are running DREAM. You may only operate inside the memories/ and instructions/ folders.\n\n" +
+        "You are running DREAM (step 2/2).\n\n" +
+        "You have a catalog of all notes (metadata+previews) and full contents for selected_files.\n" +
         "Return ONLY valid JSON matching output_contract.\n\n" +
-        JSON.stringify(context, null, 2),
+        JSON.stringify(step2, null, 2),
     },
   ];
 
-  const raw = await openaiChat(messages, { model });
+  const raw = await openaiChat(messages2, { model });
   const parsed = safeJsonParse(raw);
   if (!parsed) throw new Error("Dream did not return valid JSON.");
 
