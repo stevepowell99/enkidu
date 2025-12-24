@@ -14,7 +14,7 @@ import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 import http from "node:http";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -49,6 +49,161 @@ const MEMORY_FOLDERS = [
   path.join(MEMORIES_DIR, "howto"),
   path.join(MEMORIES_DIR, "diary"),
 ];
+
+// -----------------------------
+// Storage mode (local filesystem vs Supabase SQL)
+// -----------------------------
+function getStorageMode() {
+  // Read .env lazily (no deps) so local dev can set ENKIDU_STORAGE there.
+  loadDotenvIfPresent();
+  return String(process.env.ENKIDU_STORAGE || "local").toLowerCase().trim() || "local";
+}
+
+function isSupabaseMode() {
+  return getStorageMode() === "supabase";
+}
+
+function assertSafeMemoriesRelPath(rel) {
+  // Purpose: validate "memories/..." paths coming from DB or API (no filesystem assumptions).
+  const p = String(rel || "").replaceAll("\\", "/").trim();
+  if (!p.startsWith("memories/")) throw new Error(`Path must start with memories/: ${p}`);
+  const parts = p.split("/").filter(Boolean);
+  if (parts.some((x) => x === "." || x === "..")) throw new Error(`Invalid path segment: ${p}`);
+  if (parts.some((x) => x.includes("\u0000"))) throw new Error(`Invalid path: ${p}`);
+  return p;
+}
+
+function getSupabaseConfig() {
+  loadDotenvIfPresent();
+  const url = String(process.env.SUPABASE_URL || "").trim().replace(/\/+$/, "");
+  const key = String(process.env.SUPABASE_SERVICE_ROLE_KEY || "").trim();
+  if (!url) throw new Error("Missing SUPABASE_URL (required for ENKIDU_STORAGE=supabase)");
+  if (!key) throw new Error("Missing SUPABASE_SERVICE_ROLE_KEY (required for ENKIDU_STORAGE=supabase)");
+  return { url, key };
+}
+
+async function supabaseRest(table, { method = "GET", query = {}, body = null } = {}) {
+  // Minimal Supabase PostgREST client (no deps).
+  const { url, key } = getSupabaseConfig();
+  const qs = new URLSearchParams();
+  for (const [k, v] of Object.entries(query || {})) {
+    if (v === undefined || v === null || v === "") continue;
+    qs.set(k, String(v));
+  }
+  const full = `${url}/rest/v1/${table}${qs.toString() ? "?" + qs.toString() : ""}`;
+  const headers = { apikey: key, Authorization: `Bearer ${key}` };
+  if (body !== null) headers["Content-Type"] = "application/json";
+
+  const resp = await fetch(full, {
+    method,
+    headers,
+    body: body === null ? undefined : JSON.stringify(body),
+  });
+
+  const text = await resp.text();
+  if (!resp.ok) throw new Error(`Supabase HTTP ${resp.status}: ${text}`);
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+async function sbInsertSessionEvent(role, content, meta = {}) {
+  await supabaseRest("session_events", {
+    method: "POST",
+    query: { select: "id" },
+    body: [{ role: String(role || ""), content: String(content || ""), meta: meta || {} }],
+  });
+}
+
+async function sbLoadRecentSessionEvents(maxN = 30) {
+  const rows = await supabaseRest("session_events", {
+    method: "GET",
+    query: { select: "role,content,created_at", order: "created_at.desc", limit: String(Math.max(1, Number(maxN) || 30)) },
+  });
+  const out = [];
+  for (const r of Array.isArray(rows) ? rows : []) {
+    const role = String(r?.role || "");
+    const content = String(r?.content || "");
+    if ((role === "user" || role === "assistant") && content.trim()) out.push({ role, content, ts: r?.created_at });
+  }
+  out.reverse(); // oldest->newest
+  return out;
+}
+
+async function sbUpsertMemoryRow({ path: relPath, content, title, tags, importance }) {
+  const p = assertSafeMemoriesRelPath(relPath);
+  const row = {
+    path: p,
+    title: title === undefined ? null : String(title || ""),
+    tags: Array.isArray(tags) ? tags.map((t) => String(t || "").trim()).filter(Boolean) : [],
+    content: String(content || ""),
+    importance: Number.isFinite(Number(importance)) ? Number(importance) : 0,
+    updated_at: nowIso(),
+  };
+  await supabaseRest("memories", { method: "POST", query: { on_conflict: "path", select: "id" }, body: [row] });
+}
+
+async function sbGetMemoryByPath(relPath) {
+  const p = assertSafeMemoriesRelPath(relPath);
+  const rows = await supabaseRest("memories", { method: "GET", query: { select: "*", path: `eq.${p}`, limit: "1" } });
+  return Array.isArray(rows) ? rows[0] || null : null;
+}
+
+async function sbDeleteMemoryByPath(relPath) {
+  const p = assertSafeMemoriesRelPath(relPath);
+  await supabaseRest("memories", { method: "DELETE", query: { path: `eq.${p}` } });
+}
+
+async function sbMoveMemory(fromRel, toRel) {
+  const from = assertSafeMemoriesRelPath(fromRel);
+  const to = assertSafeMemoriesRelPath(toRel);
+  await supabaseRest("memories", { method: "PATCH", query: { path: `eq.${from}` }, body: { path: to, updated_at: nowIso() } });
+}
+
+function listItemsFromPaths(prefix, paths) {
+  // Purpose: emulate a directory listing from a set of full paths.
+  const pfx = String(prefix || "").replaceAll("\\", "/").replace(/\/+$/, "");
+  const want = pfx ? pfx + "/" : "";
+  const dirs = new Set();
+  const files = new Set();
+
+  for (const full of paths) {
+    const rel = String(full || "").replaceAll("\\", "/");
+    if (want && !rel.startsWith(want)) continue;
+    const rest = want ? rel.slice(want.length) : rel;
+    if (!rest) continue;
+    const seg = rest.split("/")[0];
+    if (!seg) continue;
+    if (rest.includes("/")) dirs.add(seg);
+    else files.add(seg);
+  }
+
+  return [
+    ...Array.from(dirs).sort().map((name) => ({ name, type: "dir" })),
+    ...Array.from(files).sort().map((name) => ({ name, type: "file" })),
+  ];
+}
+
+async function sbListVirtualDir(relDir) {
+  const p = String(relDir || "").replaceAll("\\", "/").trim() || "memories";
+  if (!p.startsWith("memories")) throw new Error(`Only memories/ browsing supported in supabase mode: ${p}`);
+
+  const likePrefix = p.replace(/\/+$/, "") + "/%";
+  const rows = await supabaseRest("memories", { method: "GET", query: { select: "path", path: `like.${likePrefix}`, limit: "5000" } });
+  const paths = (Array.isArray(rows) ? rows : []).map((r) => r.path);
+  return { path: p, items: listItemsFromPaths(p, paths) };
+}
+
+async function sbListDiaryFiles() {
+  const rows = await supabaseRest("memories", {
+    method: "GET",
+    query: { select: "path", path: "like.memories/diary/%", order: "path.desc", limit: "200" },
+  });
+  return (Array.isArray(rows) ? rows : []).map((r) => String(r.path || ""));
+}
 
 function eprint(...args) {
   console.error(...args);
@@ -97,6 +252,7 @@ function cosineSim(a, b) {
 }
 
 async function appendSessionEvent(role, content, meta = {}) {
+  if (isSupabaseMode()) return await sbInsertSessionEvent(role, content, meta);
   await ensureDirs();
   const evt = {
     ts: nowIso(),
@@ -108,6 +264,7 @@ async function appendSessionEvent(role, content, meta = {}) {
 }
 
 async function loadRecentSessionEvents(maxN = 30) {
+  if (isSupabaseMode()) return await sbLoadRecentSessionEvents(maxN);
   if (!fs.existsSync(SESSION_LOG_FILE)) return [];
   const raw = await readFileUtf8(SESSION_LOG_FILE);
   const lines = raw.split(/\r?\n/).filter(Boolean);
@@ -546,6 +703,8 @@ async function cmdEmbed(args = {}) {
 }
 
 async function retrieveTopMemoriesByEmbeddings(queries, topN) {
+  // Embeddings are local-file based for now.
+  if (isSupabaseMode()) return null;
   const idx = await loadIndex();
   const entries = idx.entries || [];
   const cache = await loadEmbeddingsCache();
@@ -629,6 +788,7 @@ async function expandQueriesWithAI(prompt, model) {
 }
 
 async function retrieveTopMemories(prompt, topN) {
+  if (isSupabaseMode()) return await retrieveTopMemoriesSupabase(prompt, topN);
   const idx = await loadIndex();
   const entries = idx.entries || [];
 
@@ -662,6 +822,52 @@ async function retrieveTopMemories(prompt, topN) {
   });
 
   return scored.slice(0, topN).map(([_, e, text]) => ({ entry: e, text }));
+}
+
+async function retrieveTopMemoriesSupabase(prompt, topN) {
+  // Minimal retrieval: pull a small candidate set from SQL and rank via keyword overlap.
+  const n = Math.max(1, Number(topN) || 5);
+  const promptTokens = tokenize(prompt);
+  const tokens = Array.from(promptTokens).slice(0, 10);
+
+  const query = { select: "path,title,tags,importance,content,created_at,updated_at", limit: "80", order: "updated_at.desc" };
+  if (tokens.length) {
+    const ors = [];
+    for (const t of tokens) {
+      const pat = `*${t}*`;
+      ors.push(`title.ilike.${pat}`);
+      ors.push(`content.ilike.${pat}`);
+    }
+    query.or = `(${ors.join(",")})`;
+  }
+
+  const rows = await supabaseRest("memories", { method: "GET", query });
+  const scored = [];
+  for (const r of Array.isArray(rows) ? rows : []) {
+    const title = String(r?.title || "");
+    const content = String(r?.content || "");
+    let score = 0;
+    score += 3 * intersectionSize(tokenize(title), promptTokens);
+    score += 1 * intersectionSize(tokenize(content), promptTokens);
+    const imp = Number.isFinite(Number(r?.importance)) ? Number(r.importance) : 0;
+    score += imp * IMPORTANCE_WEIGHT_KEYWORD;
+    if (score > 0 || !tokens.length) {
+      scored.push([
+        score,
+        {
+          path: String(r?.path || ""),
+          title,
+          tags: Array.isArray(r?.tags) ? r.tags : [],
+          importance: imp,
+          created: r?.created_at || "",
+          updated: r?.updated_at || "",
+        },
+        content,
+      ]);
+    }
+  }
+  scored.sort((a, b) => b[0] - a[0]);
+  return scored.slice(0, n).map(([_, entry, text]) => ({ entry, text }));
 }
 
 function intersectionSize(aSet, bSet) {
