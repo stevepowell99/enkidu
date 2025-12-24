@@ -10,5 +10,6 @@ yarn-error.log*
 # Generated
 memories/_index.json
 memories/_embeddings.json
+memories/_source_embeddings.json
 
 # Editor/workspace

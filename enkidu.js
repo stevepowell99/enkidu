@@ -24,11 +24,15 @@ const REPO_ROOT = __dirname;
 const MEMORIES_DIR = path.join(REPO_ROOT, "memories");
 const INDEX_FILE = path.join(MEMORIES_DIR, "_index.json");
 const EMBEDDINGS_FILE = path.join(MEMORIES_DIR, "_embeddings.json");
+const SOURCE_EMBEDDINGS_FILE = path.join(MEMORIES_DIR, "_source_embeddings.json");
+const SOURCES_DIR = path.join(MEMORIES_DIR, "sources");
+const SOURCES_VERBATIM_DIR = path.join(SOURCES_DIR, "verbatim");
 const SESSIONS_DIR = path.join(MEMORIES_DIR, "sessions");
 const SESSION_LOG_FILE = path.join(SESSIONS_DIR, "recent.jsonl");
 const INSTRUCTIONS_DIR = path.join(REPO_ROOT, "instructions");
 const WORK_INSTRUCTION_FILE = path.join(INSTRUCTIONS_DIR, "work.md");
 const DREAM_INSTRUCTION_FILE = path.join(INSTRUCTIONS_DIR, "dream.md");
+const SOURCES_INSTRUCTION_FILE = path.join(INSTRUCTIONS_DIR, "sources.md");
 const DOTENV_FILE = path.join(REPO_ROOT, ".env");
 
 const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
@@ -134,6 +138,7 @@ async function ensureDirs() {
   await fsp.mkdir(MEMORIES_DIR, { recursive: true });
   await fsp.mkdir(SESSIONS_DIR, { recursive: true });
   await fsp.mkdir(INSTRUCTIONS_DIR, { recursive: true });
+  await fsp.mkdir(SOURCES_VERBATIM_DIR, { recursive: true });
   for (const d of MEMORY_FOLDERS) await fsp.mkdir(d, { recursive: true });
 }
 
@@ -190,10 +195,17 @@ function assertWithinWritableRoots(absPath) {
 }
 
 function assertNotProtectedWritable(absPath) {
-  // Keep generated/index files under code control.
+  // Keep generated/index + verbatim sources under code control.
   const resolved = path.resolve(absPath);
-  const protectedPaths = [path.resolve(INDEX_FILE)];
+  const protectedPaths = [
+    path.resolve(INDEX_FILE),
+    path.resolve(EMBEDDINGS_FILE),
+    path.resolve(SOURCE_EMBEDDINGS_FILE),
+  ];
   if (protectedPaths.includes(resolved)) throw new Error(`Protected path (not editable by dream): ${safeRelPath(resolved)}`);
+
+  const verbatimRoot = path.resolve(SOURCES_VERBATIM_DIR) + path.sep;
+  if (resolved.startsWith(verbatimRoot)) throw new Error(`Protected path (read-only sources): ${safeRelPath(resolved)}`);
 }
 
 function parseFrontMatter(text) {
@@ -340,6 +352,92 @@ async function loadEmbeddingsCache() {
 async function writeEmbeddingsCache(cache) {
   await ensureDirs();
   await writeFileUtf8(EMBEDDINGS_FILE, JSON.stringify(cache, null, 2) + "\n");
+}
+
+async function loadSourceEmbeddingsCache() {
+  if (!fs.existsSync(SOURCE_EMBEDDINGS_FILE)) return null;
+  try {
+    return JSON.parse(await readFileUtf8(SOURCE_EMBEDDINGS_FILE));
+  } catch {
+    return null;
+  }
+}
+
+async function writeSourceEmbeddingsCache(cache) {
+  await ensureDirs();
+  await writeFileUtf8(SOURCE_EMBEDDINGS_FILE, JSON.stringify(cache, null, 2) + "\n");
+}
+
+async function ensureSourceEmbeddingsCache() {
+  const model = process.env.OPENAI_EMBEDDING_MODEL || DEFAULT_EMBEDDING_MODEL;
+  const existing = await loadSourceEmbeddingsCache();
+  if (existing && existing.items) return existing;
+  const fresh = { model, generated_at: nowIso(), items: {} };
+  await writeSourceEmbeddingsCache(fresh);
+  return fresh;
+}
+
+async function updateEmbeddingForSourcePath(relPath) {
+  const rel = String(relPath || "").replaceAll("\\", "/");
+  if (!rel.toLowerCase().startsWith("memories/sources/") || !rel.toLowerCase().endsWith(".md")) return;
+
+  const abs = path.join(REPO_ROOT, rel);
+  assertWithinMemories(abs);
+  if (!fs.existsSync(abs)) return;
+
+  const md = await readFileUtf8(abs);
+  const body = stripFrontMatter(md).trim();
+  const h = sha256Hex(body);
+
+  const cache = await ensureSourceEmbeddingsCache();
+  cache.items = cache.items || {};
+  const prev = cache.items[rel];
+  if (prev && prev.hash === h && Array.isArray(prev.vector)) return;
+
+  const embedText = body.slice(0, 12000);
+  const vec = await openaiEmbed(embedText, { model: cache.model || DEFAULT_EMBEDDING_MODEL });
+  cache.items[rel] = { hash: h, vector: vec };
+  cache.generated_at = nowIso();
+  await writeSourceEmbeddingsCache(cache);
+}
+
+async function listStoredSourceVerbatimFiles() {
+  if (!fs.existsSync(SOURCES_VERBATIM_DIR)) return [];
+  const ents = await fsp.readdir(SOURCES_VERBATIM_DIR);
+  return ents
+    .filter((n) => n.toLowerCase().endsWith(".md"))
+    .map((n) => `memories/sources/verbatim/${n}`);
+}
+
+async function retrieveTopSourcesByEmbeddings(queries, topN) {
+  const cache = await loadSourceEmbeddingsCache();
+  if (!cache || !cache.items) return [];
+
+  const qs = (Array.isArray(queries) ? queries : [String(queries || "")]).map((s) => String(s || "").trim()).filter(Boolean);
+  if (!qs.length) return [];
+
+  const qVecs = [];
+  for (const q of qs) qVecs.push(await openaiEmbed(q, { model: cache.model || DEFAULT_EMBEDDING_MODEL }));
+
+  const all = await listStoredSourceVerbatimFiles();
+  const scored = [];
+  for (const rel of all) {
+    const item = cache.items[rel];
+    if (!item || !Array.isArray(item.vector)) continue;
+    let best = -1;
+    for (const qv of qVecs) best = Math.max(best, cosineSim(qv, item.vector));
+    scored.push([best, rel]);
+  }
+  scored.sort((a, b) => b[0] - a[0]);
+  const picked = scored.slice(0, topN).map((x) => x[1]);
+
+  const out = [];
+  for (const rel of picked) {
+    const abs = path.join(REPO_ROOT, rel);
+    if (!fs.existsSync(abs)) continue;
+    out.push({ path: rel, content: (await readFileUtf8(abs)).slice(0, 4000) });
+  }
+  return out;
 }
 
 async function ensureEmbeddingsCache() {
@@ -693,7 +791,7 @@ function normaliseHistory(history) {
   return out.slice(-20);
 }
 
-async function workCore({ prompt, model, history, sources, runNow }) {
+async function workCore({ prompt, model, history, runNow }) {
   const instruction = await readInstruction(WORK_INSTRUCTION_FILE);
   const fast = Boolean(runNow);
   const route = fast ? { needRecency: false, needExpansion: false } : heuristicRoute(prompt);
@@ -729,10 +827,10 @@ async function workCore({ prompt, model, history, sources, runNow }) {
   }
   if (memChunks.length) userParts.push("Relevant memories (may be incomplete):\n\n" + memChunks.join("\n\n"));
 
-  // Optional read-only source excerpts (provided by UI; not stored server-side).
-  if (!fast && Array.isArray(sources) && sources.length) {
-    const srcChunks = sources
-      .slice(0, 5)
+  // Read-only sources (server-side verbatim store + embeddings).
+  const storedSources = fast ? [] : await retrieveTopSourcesByEmbeddings(queries, 3);
+  if (storedSources.length) {
+    const srcChunks = storedSources
       .map((s) => {
         const p = String(s?.path || "");
         const c = String(s?.content || "").trim();
@@ -750,6 +848,7 @@ async function workCore({ prompt, model, history, sources, runNow }) {
     tags: entry.tags || [],
     importance: Number.isFinite(Number(entry.importance)) ? Number(entry.importance) : 0,
   }));
+  const usedSources = storedSources.map((s) => ({ path: s.path || "" }));
 
   const messages = [
     { role: "system", content: instruction },
@@ -762,7 +861,7 @@ async function workCore({ prompt, model, history, sources, runNow }) {
 
   // If the model requests a web fetch, do ONE fetch then ask again with the fetched text.
   const url = extractWebFetchUrl(raw1);
-  if (!url) return { raw: raw1, usedMemories };
+  if (!url) return { raw: raw1, usedMemories, usedSources };
 
   const webText = await fetchWebText(url);
   const messages2 = [
@@ -786,9 +885,10 @@ async function workCore({ prompt, model, history, sources, runNow }) {
     return {
       raw: "I tried one web fetch already, but you requested another. Please answer using the fetched content I provided.",
       usedMemories,
+      usedSources,
     };
   }
-  return { raw: raw2, usedMemories };
+  return { raw: raw2, usedMemories, usedSources };
 }
 
 async function openaiChat(messages, opts = {}) {
@@ -903,7 +1003,7 @@ async function cmdWork(args) {
   const prompt = String(args._[1] || "").trim();
   if (!prompt) throw new Error('Usage: node enkidu.js work \"your prompt\"');
 
-  const { raw } = await workCore({ prompt, model: "", history: [] });
+  const { raw } = await workCore({ prompt, model: "", history: [], runNow: false });
   const { answer, capture } = splitAnswerAndCapture(raw);
   await writeAutoCaptureToInbox(capture);
   await appendSessionEvent("user", prompt);
@@ -1090,6 +1190,104 @@ async function applyDreamOps(ops) {
   return applied;
 }
 
+async function ingestSourcesBatch(files, model) {
+  // files: [{path, content}] from UI folder picker
+  await ensureDirs();
+  const sys = await readInstruction(SOURCES_INSTRUCTION_FILE);
+
+  const createdSources = [];
+  const createdMemories = [];
+
+  for (const f of files) {
+    const originalPath = String(f?.path || "").trim() || "unknown.md";
+    const content = String(f?.content || "");
+    if (!content.trim()) continue;
+
+    const sourceId = sha256Hex(content).slice(0, 12);
+    const baseSlug = slugify(path.basename(originalPath).replace(/\.md$/i, "")) || "source";
+    const verbatimName = `${sourceId}_${baseSlug}.md`.toLowerCase();
+    const verbatimRel = `memories/sources/verbatim/${verbatimName}`;
+    const verbatimAbs = path.join(REPO_ROOT, verbatimRel);
+    assertWithinMemories(verbatimAbs);
+
+    // Write verbatim copy once (read-only store).
+    if (!fs.existsSync(verbatimAbs)) {
+      const md = [
+        "---",
+        `title: ${baseSlug}`,
+        `created: ${nowIso()}`,
+        "tags: source, verbatim",
+        "importance: 0",
+        "source: sources_ingest",
+        `source_id: ${sourceId}`,
+        `original_path: ${originalPath}`,
+        "---",
+        "",
+        content,
+        "",
+      ].join("\n");
+      await writeFileUtf8(verbatimAbs, md);
+      await updateEmbeddingForSourcePath(verbatimRel);
+    }
+
+    createdSources.push({ original_path: originalPath, verbatim_path: verbatimRel });
+
+    // Ask model to produce a curated memory note (filed like dream would).
+    const userPayload = JSON.stringify({ original_path: originalPath, source_content: content.slice(0, 12000) }, null, 2);
+    const messages = [
+      { role: "system", content: sys },
+      { role: "user", content: userPayload },
+    ];
+    const raw = await openaiChat(messages, { model });
+    const parsed = safeJsonParse(raw);
+    if (!parsed) continue;
+
+    const dest = String(parsed.dest || "inbox").toLowerCase();
+    const allowed = new Set(["inbox", "people", "projects", "howto"]);
+    if (!allowed.has(dest)) continue;
+
+    const title = String(parsed.title || baseSlug).trim() || baseSlug;
+    const tags = String(parsed.tags || "source").trim();
+    const importance = Number.isFinite(Number(parsed.importance)) ? Math.max(0, Math.min(3, Number(parsed.importance))) : 1;
+    const summaryMd = String(parsed.summary_md || "").trim();
+    const why = String(parsed.why || "").trim();
+
+    const created = nowIso();
+    const fname = `${filenameTimestamp()}_${slugify(title).slice(0, 60)}.md`.toLowerCase();
+    const memRel = `memories/${dest}/${fname}`;
+    const memAbs = path.join(REPO_ROOT, memRel);
+    assertWithinMemories(memAbs);
+
+    const mem = [
+      "---",
+      `title: ${title}`,
+      `created: ${created}`,
+      `tags: ${tags}`,
+      `importance: ${importance}`,
+      "source: sources_ingest",
+      `source_ref: ${verbatimRel}`,
+      `original_path: ${originalPath}`,
+      "---",
+      "",
+      summaryMd,
+      "",
+      why ? `Why: ${why}` : "",
+      "",
+    ].join("\n");
+
+    await writeFileUtf8(memAbs, mem);
+
+    // Update memory index + memory embedding (incremental).
+    const entries = await buildIndex();
+    await writeIndex(entries);
+    await updateEmbeddingForMemoryPath(memRel);
+
+    createdMemories.push({ path: memRel, title, dest, source_ref: verbatimRel });
+  }
+
+  return { createdSources, createdMemories };
+}
+
 // -----------------------------
 // Tiny UI server (Bootstrap CDN)
 // -----------------------------
@@ -1152,15 +1350,25 @@ async function cmdServe(args) {
         const prompt = String(data.prompt || "").trim();
         const model = String(data.model || "").trim();
         const history = data.history;
-        const sources = data.sources;
         const runNow = Boolean(data.runNow);
         if (!prompt) return sendJson(res, 400, { error: "Missing prompt" });
-        const { raw, usedMemories } = await workCore({ prompt, model, history, sources, runNow });
+        const { raw, usedMemories, usedSources } = await workCore({ prompt, model, history, runNow });
         const { answer, capture } = splitAnswerAndCapture(raw);
         const capturePath = await writeAutoCaptureToInbox(capture);
         await appendSessionEvent("user", prompt);
         await appendSessionEvent("assistant", String(answer || "").trim());
-        return sendJson(res, 200, { answer, capturePath, usedMemories });
+        return sendJson(res, 200, { answer, capturePath, usedMemories, usedSources });
+      }
+
+      if (req.method === "POST" && u.pathname === "/api/sources/ingest") {
+        const body = await readRequestBody(req);
+        const data = req.headers["content-type"]?.includes("application/json")
+          ? safeJsonParse(body) || {}
+          : parseFormUrlEncoded(body);
+        const model = String(data.model || "").trim();
+        const files = Array.isArray(data.files) ? data.files : [];
+        const out = await ingestSourcesBatch(files, model);
+        return sendJson(res, 200, { ok: true, ...out });
       }
 
       if (req.method === "POST" && u.pathname === "/api/dream") {
@@ -1457,14 +1665,17 @@ function renderHtml() {
         <div class=\"col-12\">
           <div class=\"card shadow-sm\">
             <div class=\"card-body\">
-              <h2 class=\"h5\">Sources (read-only)</h2>
-              <div class=\"row g-2 align-items-end\">
+              <h2 class=\"h5\">Sources (ingest)</h2>
+              <div class=\"small text-muted\">Pick a folder of markdown files; Enkidu will store verbatim sources and create curated memory notes.</div>
+              <div class=\"row g-2 align-items-end mt-1\">
                 <div class=\"col-12 col-lg-8\">
-                  <div class=\"small text-muted mb-1\">Pick a folder of markdown files (subfolders allowed)</div>
                   <input id=\"sourcesFolder\" class=\"form-control\" type=\"file\" webkitdirectory multiple />
                 </div>
                 <div class=\"col-12 col-lg-4\">
-                  <button id=\"clearSourcesBtn\" class=\"btn btn-outline-secondary w-100\">Clear sources</button>
+                  <div class=\"d-flex gap-2\">
+                    <button id=\"ingestSourcesBtn\" class=\"btn btn-outline-primary w-100\">Ingest</button>
+                    <button id=\"clearSourcesBtn\" class=\"btn btn-outline-secondary w-100\">Clear</button>
+                  </div>
                 </div>
               </div>
               <div id=\"sourcesStatus\" class=\"small text-muted mt-2\"></div>
@@ -1601,66 +1812,64 @@ function renderHtml() {
       const usedSourcesEl = document.getElementById('usedSources');
 
       const sourcesFolderEl = document.getElementById('sourcesFolder');
+      const ingestSourcesBtn = document.getElementById('ingestSourcesBtn');
       const clearSourcesBtn = document.getElementById('clearSourcesBtn');
       const sourcesStatusEl = document.getElementById('sourcesStatus');
 
-      // Sources are kept in-memory in the browser (read-only), and only top excerpts are sent per request.
-      let sourcesIndex = [];
-
-      function tok(s) {
-        const m = String(s || '').toLowerCase().match(/[a-z0-9]{2,}/g);
-        return new Set(m || []);
-      }
-      function isectSize(a, b) { let c = 0; for (const x of a) if (b.has(x)) c++; return c; }
-
-      async function buildSourcesIndexFromFiles(fileList) {
-        const out = [];
-        for (const f of Array.from(fileList || [])) {
-          if (!String(f.name || '').toLowerCase().endsWith('.md')) continue;
-          const rel = f.webkitRelativePath || f.name;
-          const content = await f.text();
-          out.push({
-            path: rel,
-            content,
-            tokens: Array.from(tok(content)),
-          });
-        }
-        return out;
-      }
-
-      function retrieveTopSources(prompt, maxN) {
-        const pTok = tok(prompt);
-        const scored = sourcesIndex.map(s => {
-          const sTok = new Set(s.tokens || []);
-          const score = isectSize(sTok, pTok);
-          return { score, s };
-        }).filter(x => x.score > 0)
-          .sort((a,b) => b.score - a.score)
-          .slice(0, maxN)
-          .map(x => x.s);
-
-        return scored.map(s => ({
-          path: s.path,
-          content: String(s.content || '').slice(0, 4000) // keep payload bounded
-        }));
+      function selectedMdFiles() {
+        return Array.from(sourcesFolderEl.files || []).filter(f => String(f.name || '').toLowerCase().endsWith('.md'));
       }
 
       sourcesFolderEl.addEventListener('change', async () => {
-        sourcesStatusEl.textContent = 'Indexing sources...';
-        try {
-          sourcesIndex = await buildSourcesIndexFromFiles(sourcesFolderEl.files);
-          sourcesStatusEl.textContent = 'Loaded ' + sourcesIndex.length + ' markdown file(s).';
-        } catch (e) {
-          sourcesIndex = [];
-          sourcesStatusEl.textContent = 'Error indexing sources: ' + (e && e.message ? e.message : String(e));
-        }
+        const files = selectedMdFiles();
+        sourcesStatusEl.textContent = files.length ? ('Selected ' + files.length + ' .md file(s).') : '';
       });
 
+      ingestSourcesBtn.onclick = async () => {
+        const files = selectedMdFiles();
+        if (!files.length) {
+          sourcesStatusEl.textContent = 'No .md files selected.';
+          return;
+        }
+
+        ingestSourcesBtn.disabled = true;
+        clearSourcesBtn.disabled = true;
+        sourcesStatusEl.textContent = 'Ingesting...';
+
+        const model = getSelectedModel();
+        let done = 0;
+        let createdMem = 0;
+        let createdSrc = 0;
+        const batchSize = 5;
+
+        try {
+          for (let i = 0; i < files.length; i += batchSize) {
+            const batch = files.slice(i, i + batchSize);
+            const payloadFiles = [];
+            for (const f of batch) {
+              const rel = f.webkitRelativePath || f.name;
+              payloadFiles.push({ path: rel, content: await f.text() });
+            }
+            const resp = await postJson('/api/sources/ingest', { model, files: payloadFiles });
+            if (resp && resp.error) {
+              sourcesStatusEl.textContent = 'Error: ' + resp.error;
+              return;
+            }
+            createdMem += (resp.createdMemories || []).length;
+            createdSrc += (resp.createdSources || []).length;
+            done += batch.length;
+            sourcesStatusEl.textContent = 'Ingested ' + done + '/' + files.length + ' files. Created ' + createdMem + ' memory notes.';
+          }
+          sourcesStatusEl.textContent = 'Done. Created ' + createdMem + ' memory notes from ' + createdSrc + ' source file(s).';
+        } finally {
+          ingestSourcesBtn.disabled = false;
+          clearSourcesBtn.disabled = false;
+        }
+      };
+
       clearSourcesBtn.onclick = () => {
-        sourcesIndex = [];
         sourcesFolderEl.value = '';
         sourcesStatusEl.textContent = '';
-        usedSourcesEl.textContent = '';
       };
 
       // Persist model selection (radio buttons).
@@ -1755,9 +1964,9 @@ function renderHtml() {
           usedSourcesEl.textContent = '(skipped: RunNow)';
         } else {
           usedMemoriesEl.textContent = '(retrieving...)';
-          usedSourcesEl.textContent = sourcesIndex.length ? '(retrieving...)' : '(none)';
+          usedSourcesEl.textContent = '(retrieving...)';
         }
-        const sources = runNow ? [] : retrieveTopSources(workPrompt.value, 3);
+        const sources = [];
         let resp = null;
         try {
           resp = await postJson('/api/work', { prompt: workPrompt.value, model, history, sources, runNow: !!runNow });
@@ -1783,15 +1992,11 @@ function renderHtml() {
               .join('');
           }
         }
-        // Show which sources were sent (client-side retrieval).
-        if (!runNow) {
-          if (sources && sources.length) {
-            usedSourcesEl.innerHTML = sources
-              .map(s => '<div><code>' + escapeHtml(s.path || '') + '</code></div>')
-              .join('');
-          } else {
-            usedSourcesEl.textContent = '(none)';
-          }
+        // Show which sources were included (server-side retrieval).
+        if (!runNow && resp && Array.isArray(resp.usedSources)) {
+          const ss = resp.usedSources;
+          if (!ss.length) usedSourcesEl.textContent = '(none)';
+          else usedSourcesEl.innerHTML = ss.map(s => '<div><code>' + escapeHtml(s.path || '') + '</code></div>').join('');
         }
 
         if (resp && resp.error && !resp.answer) {

@@ -15,6 +15,8 @@ There are three operations:
 
 the point is to make as far as possible a soft architecture. so we don't automate in py what dreaming means. as far as possible we have self-updatable text instructions how to do it.
 
+The Sources UI picker should allow user to identify a folder of (subfolders of) .md files. then, the currently selected model walks through the files and makes summary memories, already filing them as the Dreamer would file them, but also including links to the original files so the agent can later use the entire contents if required and append as payload to an ai request. maybe we should also get the embeddings of the whole source file as well? 
+
 
 Later I would like to:
 - make it autonomous, running in the background
