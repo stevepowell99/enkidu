@@ -52,3 +52,5 @@
 {"ts":"2025-12-24T16:53:47Z","role":"assistant","content":"Do you mean \"5\" as:\nA) choose topic 5 from the earlier list (English grammar for Bosnian speakers), or\nB) ask for five questions on participles/verb forms?\n\nReply A or B."}
 {"ts":"2025-12-24T16:54:03Z","role":"user","content":"1"}
 {"ts":"2025-12-24T16:54:03Z","role":"assistant","content":"Do you mean A) topic 5 — English grammar for Bosnian speakers, or B) five questions on participles/verb forms? Reply A or B."}
+{"ts":"2025-12-24T17:54:33Z","role":"user","content":"next bosnian test please"}
+{"ts":"2025-12-24T17:54:33Z","role":"assistant","content":"Shall I make a 5-question Bosnian multiple-choice test focused on participles — and would you like it intermediate or harder?"}

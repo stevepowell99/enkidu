@@ -563,7 +563,7 @@
           if (r.needExpansion) flags.push('expand');
           setTypingIndicatorLabel('Answering (mem ' + memN + '/' + memCap + ', src ' + srcN + '/' + srcCap + (flags.length ? '; ' + flags.join('+') : '') + ')');
 
-          resp = await postJson('/api/work/answer', { planToken: plan.planToken });
+          resp = await postJson('/api/work/answer', { planToken: plan.planToken, planEcho: plan.planEcho });
         } finally {
           workBtn.disabled = false;
           workBtnNow.disabled = false;

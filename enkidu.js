@@ -1366,7 +1366,7 @@ function normaliseHistory(history) {
 // -----------------------------
 
 const WORK_PLAN_CACHE = new Map(); // planToken -> { createdAtMs, plan }
-const WORK_PLAN_TTL_MS = 2 * 60 * 1000;
+const WORK_PLAN_TTL_MS = 10 * 60 * 1000;
 
 const DREAM_PLAN_CACHE = new Map(); // planToken -> { createdAtMs, plan }
 const DREAM_PLAN_TTL_MS = 10 * 60 * 1000;
@@ -1558,6 +1558,18 @@ async function workAnswerCore(plan) {
     };
   }
   return { raw: raw2 };
+}
+
+function normalisePlanEcho(plan) {
+  const p = plan || {};
+  return {
+    prompt: String(p.prompt || "").trim(),
+    model: String(p.model || "").trim(),
+    historyNorm: Array.isArray(p.historyNorm) ? normaliseHistory(p.historyNorm) : [],
+    userContent: String(p.userContent || ""),
+    usedMemories: Array.isArray(p.usedMemories) ? p.usedMemories : [],
+    usedSources: Array.isArray(p.usedSources) ? p.usedSources : [],
+  };
 }
 
 async function workCore({ prompt, model, history, runNow }) {
@@ -2944,6 +2956,14 @@ export async function apiHandleRequest({ method, pathname, searchParams, headers
         queries: plan.queries,
         fast: plan.fast,
         limits: plan.limits || { memTopN: 5, srcTopN: 3 },
+        planEcho: {
+          prompt: plan.prompt,
+          model: plan.model,
+          historyNorm: plan.historyNorm,
+          userContent: plan.userContent,
+          usedMemories: plan.usedMemories,
+          usedSources: plan.usedSources,
+        },
       },
     };
   }
@@ -2957,8 +2977,31 @@ export async function apiHandleRequest({ method, pathname, searchParams, headers
 
     pruneWorkPlanCache();
     const hit = WORK_PLAN_CACHE.get(planToken);
-    if (!hit || !hit.plan) return { statusCode: 400, json: { error: "Unknown/expired planToken" } };
-    const plan = hit.plan;
+    const plan = hit?.plan || null;
+    if (!plan) {
+      // Cache miss recovery: server may have restarted between plan and answer (watch mode).
+      const pe = normalisePlanEcho(data.planEcho || data.plan || {});
+      if (!pe.prompt || !pe.userContent) return { statusCode: 400, json: { error: "Unknown/expired planToken" } };
+
+      const instruction = await readInstruction(WORK_INSTRUCTION_FILE);
+      const planFromClient = {
+        prompt: pe.prompt,
+        model: pe.model,
+        instruction,
+        historyNorm: pe.historyNorm,
+        userContent: pe.userContent,
+        usedMemories: pe.usedMemories,
+        usedSources: pe.usedSources,
+      };
+
+      const { raw } = await workAnswerCore(planFromClient);
+      const { answer, capture } = splitAnswerAndCapture(raw);
+      const capturePath = await writeAutoCaptureToInbox(capture);
+      await appendSessionEvent("user", String(pe.prompt || ""));
+      await appendSessionEvent("assistant", String(answer || "").trim());
+      return { statusCode: 200, json: { answer, capturePath, usedMemories: pe.usedMemories, usedSources: pe.usedSources } };
+    }
+
     const { raw } = await workAnswerCore(plan);
     WORK_PLAN_CACHE.delete(planToken);
     const { answer, capture } = splitAnswerAndCapture(raw);
