@@ -1536,13 +1536,6 @@ async function cmdServeWatch(args) {
 
 function renderHtml() {
   // Single-file UI. Bootstrap via CDN.
-  const MODEL_CHOICES = [
-    { id: "gpt-5.2", label: "gpt-5.2 ($14.00/1M out)" },
-    { id: "gpt-5-mini", label: "gpt-5-mini ($2.00/1M out)" },
-    { id: "gpt-5-nano", label: "gpt-5-nano ($0.40/1M out)" },
-    { id: "gpt-4o-mini", label: "gpt-4o-mini ($0.60/1M out)" },
-  ];
-
   return `<!doctype html>
 <html lang=\"en\">
   <head>
@@ -1643,16 +1636,16 @@ function renderHtml() {
                   <label class=\"form-label small text-muted\">Model</label>
                   <div id=\"modelGroup\" class=\"btn-group w-100\" role=\"group\" aria-label=\"Model\">
                     <input type=\"radio\" class=\"btn-check\" name=\"modelRadio\" id=\"m52\" autocomplete=\"off\" value=\"gpt-5.2\">
-                    <label class=\"btn btn-outline-primary\" for=\"m52\">gpt-5.2<br><span class=\"small\">$14.00/1M out</span></label>
+                    <label class=\"btn btn-outline-primary\" for=\"m52\" title=\"gpt-5.2 — $14.00/1M output\">5.2</label>
 
                     <input type=\"radio\" class=\"btn-check\" name=\"modelRadio\" id=\"m5mini\" autocomplete=\"off\" value=\"gpt-5-mini\">
-                    <label class=\"btn btn-outline-primary\" for=\"m5mini\">gpt-5-mini<br><span class=\"small\">$2.00/1M out</span></label>
+                    <label class=\"btn btn-outline-primary\" for=\"m5mini\" title=\"gpt-5-mini — $2.00/1M output\">5-mini</label>
 
                     <input type=\"radio\" class=\"btn-check\" name=\"modelRadio\" id=\"m5nano\" autocomplete=\"off\" value=\"gpt-5-nano\">
-                    <label class=\"btn btn-outline-primary\" for=\"m5nano\">gpt-5-nano<br><span class=\"small\">$0.40/1M out</span></label>
+                    <label class=\"btn btn-outline-primary\" for=\"m5nano\" title=\"gpt-5-nano — $0.40/1M output\">5-nano</label>
 
                     <input type=\"radio\" class=\"btn-check\" name=\"modelRadio\" id=\"m4omini\" autocomplete=\"off\" value=\"gpt-4o-mini\">
-                    <label class=\"btn btn-outline-primary\" for=\"m4omini\">gpt-4o-mini<br><span class=\"small\">$0.60/1M out</span></label>
+                    <label class=\"btn btn-outline-primary\" for=\"m4omini\" title=\"gpt-4o-mini — $0.60/1M output\">4o-mini</label>
                   </div>
                 </div>
                 <div class=\"col-12 col-sm-6\"></div>
