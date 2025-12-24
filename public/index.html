@@ -165,7 +165,7 @@
           <div class="card shadow-sm mt-3">
             <div class="card-body">
               <h2 class="h5">Sources (ingest)</h2>
-              <div class="small text-muted">Pick a folder of markdown files; Enkidu will store verbatim sources and create curated memory notes.</div>
+              <div class="small text-muted">Ingest either a folder of markdown files or pasted text. Enkidu will store verbatim sources and create curated memory notes.</div>
               <div class="row g-2 mt-2">
                 <div class="col-12 col-lg-4">
                   <label class="form-label small text-muted mb-1">Source set name (optional)</label>
@@ -199,7 +199,27 @@
               </div>
               <div class="row g-2 align-items-end mt-1">
                 <div class="col-12 col-lg-8">
-                  <input id="sourcesFolder" class="form-control" type="file" webkitdirectory multiple />
+                  <div class="d-flex align-items-center gap-2 mb-2">
+                    <div class="form-check">
+                      <input class="form-check-input" type="radio" name="sourcesMode" id="sourcesModeFolder" value="folder" checked>
+                      <label class="form-check-label small" for="sourcesModeFolder">Folder</label>
+                    </div>
+                    <div class="form-check">
+                      <input class="form-check-input" type="radio" name="sourcesMode" id="sourcesModeText" value="text">
+                      <label class="form-check-label small" for="sourcesModeText">Paste text</label>
+                    </div>
+                    <div class="small text-muted">(same tags/context apply to both)</div>
+                  </div>
+
+                  <div id="sourcesFolderWrap">
+                    <input id="sourcesFolder" class="form-control" type="file" webkitdirectory multiple />
+                    <div class="small text-muted mt-1">Tip: dotfiles/dotfolders are ignored.</div>
+                  </div>
+
+                  <div id="sourcesTextWrap" style="display:none;">
+                    <textarea id="sourcesText" class="form-control" rows="7" placeholder="Paste any text or markdown here..."></textarea>
+                    <div class="small text-muted mt-1">This will be stored as a single verbatim source + a curated memory note.</div>
+                  </div>
                 </div>
                 <div class="col-12 col-lg-4">
                   <div class="d-flex gap-2">
@@ -208,23 +228,6 @@
                   </div>
                 </div>
               </div>
-              <details class="mt-2">
-                <summary class="small text-muted">Or paste plain text</summary>
-                <div class="row g-2 mt-2">
-                  <div class="col-12 col-lg-4">
-                    <label class="form-label small text-muted mb-1">Title / filename (optional)</label>
-                    <input id="sourcesPasteTitle" class="form-control" placeholder="e.g. Meeting notes (Dec 24)"/>
-                  </div>
-                  <div class="col-12 col-lg-8">
-                    <label class="form-label small text-muted mb-1">Text</label>
-                    <textarea id="sourcesPasteText" class="form-control" rows="6" placeholder="Paste any text or markdown here..."></textarea>
-                  </div>
-                </div>
-                <div class="d-flex gap-2 mt-2">
-                  <button id="ingestPasteBtn" class="btn btn-outline-primary">Ingest text</button>
-                  <button id="clearPasteBtn" class="btn btn-outline-secondary">Clear text</button>
-                </div>
-              </details>
               <div id="sourcesStatus" class="small text-muted mt-2"></div>
             </div>
           </div>
@@ -340,10 +343,25 @@
       const sourcesMetaTagsEl = document.getElementById('sourcesMetaTags');
       const sourcesMetaContextEl = document.getElementById('sourcesMetaContext');
       const sourcesMetaDestEl = document.getElementById('sourcesMetaDest');
-      const sourcesPasteTitleEl = document.getElementById('sourcesPasteTitle');
-      const sourcesPasteTextEl = document.getElementById('sourcesPasteText');
-      const ingestPasteBtn = document.getElementById('ingestPasteBtn');
-      const clearPasteBtn = document.getElementById('clearPasteBtn');
+      const sourcesModeFolderEl = document.getElementById('sourcesModeFolder');
+      const sourcesModeTextEl = document.getElementById('sourcesModeText');
+      const sourcesFolderWrapEl = document.getElementById('sourcesFolderWrap');
+      const sourcesTextWrapEl = document.getElementById('sourcesTextWrap');
+      const sourcesTextEl = document.getElementById('sourcesText');
+
+      function getSourcesMode() {
+        return sourcesModeTextEl && sourcesModeTextEl.checked ? 'text' : 'folder';
+      }
+
+      function updateSourcesModeUi() {
+        const mode = getSourcesMode();
+        if (sourcesFolderWrapEl) sourcesFolderWrapEl.style.display = (mode === 'folder') ? '' : 'none';
+        if (sourcesTextWrapEl) sourcesTextWrapEl.style.display = (mode === 'text') ? '' : 'none';
+        sourcesStatusEl.textContent = '';
+      }
+
+      if (sourcesModeFolderEl) sourcesModeFolderEl.addEventListener('change', updateSourcesModeUi);
+      if (sourcesModeTextEl) sourcesModeTextEl.addEventListener('change', updateSourcesModeUi);
 
       // Persist sources metadata (browser-local).
       function loadSourcesMeta() {
@@ -401,24 +419,45 @@
       });
 
       ingestSourcesBtn.onclick = async () => {
-        const files = selectedMdFiles();
-        if (!files.length) {
-          sourcesStatusEl.textContent = 'No .md files selected.';
-          return;
-        }
+        const mode = getSourcesMode();
+        const meta = currentSourcesMeta();
 
         ingestSourcesBtn.disabled = true;
         clearSourcesBtn.disabled = true;
-        sourcesStatusEl.textContent = 'Ingesting... (preparing files)';
+        sourcesStatusEl.textContent = 'Ingesting... (preparing)';
 
         const model = getSelectedModel();
-        const meta = currentSourcesMeta();
         let done = 0;
         let createdMem = 0;
         let createdSrc = 0;
         const batchSize = 5;
 
         try {
+          if (mode === 'text') {
+            const text = String(sourcesTextEl.value || '').trim();
+            if (!text) {
+              sourcesStatusEl.textContent = 'No text to ingest.';
+              return;
+            }
+            const slug = slugifyForPath(meta.name || meta.context || text.slice(0, 80));
+            const rel = 'pasted/' + tsForPath() + '_' + slug + '.md';
+            sourcesStatusEl.textContent = 'Ingesting... uploading text';
+            const resp = await postJson('/api/sources/ingest', { model, meta, files: [{ path: rel, content: text }] });
+            if (resp && resp.error) {
+              sourcesStatusEl.textContent = 'Error: ' + resp.error;
+              return;
+            }
+            createdMem += (resp.createdMemories || []).length;
+            createdSrc += (resp.createdSources || []).length;
+            sourcesStatusEl.textContent = 'Done. Created ' + createdMem + ' memory notes; stored ' + createdSrc + ' source file(s).';
+            return;
+          }
+
+          const files = selectedMdFiles();
+          if (!files.length) {
+            sourcesStatusEl.textContent = 'No .md files selected.';
+            return;
+          }
           for (let i = 0; i < files.length; i += batchSize) {
             const batch = files.slice(i, i + batchSize);
             const payloadFiles = [];
@@ -449,6 +488,7 @@
 
       clearSourcesBtn.onclick = () => {
         sourcesFolderEl.value = '';
+        sourcesTextEl.value = '';
         sourcesStatusEl.textContent = '';
       };
 
@@ -466,46 +506,7 @@
         return new Date().toISOString().toLowerCase().replace(/[-:]/g, '').replace(/\.\d{3}z$/, 'z');
       }
 
-      ingestPasteBtn.onclick = async () => {
-        const text = String(sourcesPasteTextEl.value || '').trim();
-        if (!text) {
-          sourcesStatusEl.textContent = 'No text to ingest.';
-          return;
-        }
-
-        const title = String(sourcesPasteTitleEl.value || '').trim();
-        const slug = slugifyForPath(title || text.slice(0, 80));
-        const rel = 'pasted/' + tsForPath() + '_' + slug + '.md';
-
-        ingestPasteBtn.disabled = true;
-        ingestSourcesBtn.disabled = true;
-        clearSourcesBtn.disabled = true;
-        clearPasteBtn.disabled = true;
-        sourcesStatusEl.textContent = 'Ingesting pasted text...';
-
-        try {
-          const model = getSelectedModel();
-          const meta = currentSourcesMeta();
-          const resp = await postJson('/api/sources/ingest', { model, meta, files: [{ path: rel, content: text }] });
-          if (resp && resp.error) {
-            sourcesStatusEl.textContent = 'Error: ' + resp.error;
-            return;
-          }
-          const createdMem = (resp.createdMemories || []).length;
-          const createdSrc = (resp.createdSources || []).length;
-          sourcesStatusEl.textContent = 'Done. Created ' + createdMem + ' memory notes; stored ' + createdSrc + ' source file(s).';
-        } finally {
-          ingestPasteBtn.disabled = false;
-          ingestSourcesBtn.disabled = false;
-          clearSourcesBtn.disabled = false;
-          clearPasteBtn.disabled = false;
-        }
-      };
-
-      clearPasteBtn.onclick = () => {
-        sourcesPasteTitleEl.value = '';
-        sourcesPasteTextEl.value = '';
-      };
+      updateSourcesModeUi();
 
       // Persist model selection (radio buttons).
       const MODEL_DEFAULT = 'gpt-5-mini';
