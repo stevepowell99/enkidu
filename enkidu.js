@@ -466,7 +466,13 @@ async function openaiChat(messages, opts = {}) {
   const model = String(opts.model || "").trim() || process.env.OPENAI_MODEL || DEFAULT_OPENAI_MODEL;
 
   const url = `${baseUrl}/chat/completions`;
-  const payload = { model, messages, temperature: 0.2 };
+  const payload = { model, messages };
+
+  // Model-specific parameter handling:
+  // gpt-5* currently rejects non-default temperature values (e.g., 0.2). Let it use defaults by omitting.
+  if (!/^gpt-5/i.test(model)) {
+    payload.temperature = 0.2;
+  }
 
   const resp = await fetch(url, {
     method: "POST",
@@ -913,6 +919,7 @@ function renderHtml() {
     { id: "gpt-5.2", label: "gpt-5.2 ($14.00/1M out)" },
     { id: "gpt-5-mini", label: "gpt-5-mini ($2.00/1M out)" },
     { id: "gpt-5-nano", label: "gpt-5-nano ($0.40/1M out)" },
+    { id: "gpt-4o-mini", label: "gpt-4o-mini ($0.60/1M out)" },
   ];
 
   return `<!doctype html>
@@ -1022,6 +1029,9 @@ function renderHtml() {
 
                     <input type=\"radio\" class=\"btn-check\" name=\"modelRadio\" id=\"m5nano\" autocomplete=\"off\" value=\"gpt-5-nano\">
                     <label class=\"btn btn-outline-primary\" for=\"m5nano\">gpt-5-nano<br><span class=\"small\">$0.40/1M out</span></label>
+
+                    <input type=\"radio\" class=\"btn-check\" name=\"modelRadio\" id=\"m4omini\" autocomplete=\"off\" value=\"gpt-4o-mini\">
+                    <label class=\"btn btn-outline-primary\" for=\"m4omini\">gpt-4o-mini<br><span class=\"small\">$0.60/1M out</span></label>
                   </div>
                 </div>
                 <div class=\"col-12 col-sm-6\"></div>
