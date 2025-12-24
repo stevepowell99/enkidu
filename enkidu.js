@@ -1075,6 +1075,12 @@ async function cmdServe(args) {
         return sendText(res, 200, renderHtml(), "text/html; charset=utf-8");
       }
 
+      if (req.method === "GET" && u.pathname === "/favicon.ico") {
+        // Avoid noisy 404s in browser devtools.
+        res.writeHead(204);
+        return res.end();
+      }
+
       if (req.method === "POST" && u.pathname === "/api/work") {
         const body = await readRequestBody(req);
         const data = req.headers["content-type"]?.includes("application/json")
@@ -1160,6 +1166,8 @@ async function cmdServeWatch(args) {
 
   let child = null;
   let debounceTimer = null;
+  let restarting = false;
+  const lastMtime = new Map();
 
   function startChild() {
     child = spawn(process.execPath, [scriptPath, "serve", "--port", String(port)], {
@@ -1168,23 +1176,63 @@ async function cmdServeWatch(args) {
     });
   }
 
+  async function shouldRestartForFile(f) {
+    try {
+      const st = await fsp.stat(f);
+      const m = Number(st.mtimeMs) || 0;
+      const prev = lastMtime.get(f) ?? 0;
+      if (m <= prev) return false;
+      lastMtime.set(f, m);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   function restartChild() {
     if (debounceTimer) clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => {
-      if (child) child.kill();
-      startChild();
+      if (restarting) return;
+      restarting = true;
+
+      const old = child;
+      child = null;
+      if (old) {
+        old.once("exit", () => {
+          startChild();
+          restarting = false;
+        });
+        old.kill();
+      } else {
+        startChild();
+        restarting = false;
+      }
     }, 150);
   }
 
   await ensureDirs();
   console.log("Watch mode: restarting server on changes to enkidu.js or instructions/*.md");
 
+  // Seed mtimes so we don't restart from spurious watch events.
+  for (const f of watchFiles) {
+    try {
+      const st = await fsp.stat(f);
+      lastMtime.set(f, Number(st.mtimeMs) || 0);
+    } catch {
+      // ignore
+    }
+  }
+
   startChild();
 
   const watchers = [];
   for (const f of watchFiles) {
     try {
-      watchers.push(fs.watch(f, restartChild));
+      watchers.push(
+        fs.watch(f, async () => {
+          if (await shouldRestartForFile(f)) restartChild();
+        })
+      );
     } catch {
       // Ignore missing files.
     }
@@ -1461,13 +1509,22 @@ function renderHtml() {
       }
 
       async function postJson(url, obj) {
-        const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(obj) });
-        const text = await r.text();
-        try { return JSON.parse(text); } catch { return { error: text || ('HTTP ' + r.status) }; }
+        try {
+          const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(obj) });
+          const text = await r.text();
+          try { return JSON.parse(text); } catch { return { error: text || ('HTTP ' + r.status) }; }
+        } catch (e) {
+          return { error: (e && e.message) ? e.message : String(e) };
+        }
       }
       async function getJson(url) {
-        const r = await fetch(url);
-        return await r.json();
+        try {
+          const r = await fetch(url);
+          const text = await r.text();
+          try { return JSON.parse(text); } catch { return { error: text || ('HTTP ' + r.status) }; }
+        } catch (e) {
+          return { error: (e && e.message) ? e.message : String(e) };
+        }
       }
 
       const workBtn = document.getElementById('workBtn');
