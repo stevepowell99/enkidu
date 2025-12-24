@@ -203,6 +203,23 @@
                   </div>
                 </div>
               </div>
+              <details class="mt-2">
+                <summary class="small text-muted">Or paste plain text</summary>
+                <div class="row g-2 mt-2">
+                  <div class="col-12 col-lg-4">
+                    <label class="form-label small text-muted mb-1">Title / filename (optional)</label>
+                    <input id="sourcesPasteTitle" class="form-control" placeholder="e.g. Meeting notes (Dec 24)"/>
+                  </div>
+                  <div class="col-12 col-lg-8">
+                    <label class="form-label small text-muted mb-1">Text</label>
+                    <textarea id="sourcesPasteText" class="form-control" rows="6" placeholder="Paste any text or markdown here..."></textarea>
+                  </div>
+                </div>
+                <div class="d-flex gap-2 mt-2">
+                  <button id="ingestPasteBtn" class="btn btn-outline-primary">Ingest text</button>
+                  <button id="clearPasteBtn" class="btn btn-outline-secondary">Clear text</button>
+                </div>
+              </details>
               <div id="sourcesStatus" class="small text-muted mt-2"></div>
             </div>
           </div>
@@ -322,6 +339,10 @@
       const sourcesMetaTagsEl = document.getElementById('sourcesMetaTags');
       const sourcesMetaContextEl = document.getElementById('sourcesMetaContext');
       const sourcesMetaDestEl = document.getElementById('sourcesMetaDest');
+      const sourcesPasteTitleEl = document.getElementById('sourcesPasteTitle');
+      const sourcesPasteTextEl = document.getElementById('sourcesPasteText');
+      const ingestPasteBtn = document.getElementById('ingestPasteBtn');
+      const clearPasteBtn = document.getElementById('clearPasteBtn');
 
       // Persist sources metadata (browser-local).
       function loadSourcesMeta() {
@@ -428,6 +449,61 @@
       clearSourcesBtn.onclick = () => {
         sourcesFolderEl.value = '';
         sourcesStatusEl.textContent = '';
+      };
+
+      function slugifyForPath(s) {
+        return String(s || '')
+          .trim()
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/-+/g, '-')
+          .replace(/^-|-$/g, '') || 'pasted';
+      }
+
+      function tsForPath() {
+        // 20251224t174859z
+        return new Date().toISOString().toLowerCase().replace(/[-:]/g, '').replace(/\.\d{3}z$/, 'z');
+      }
+
+      ingestPasteBtn.onclick = async () => {
+        const text = String(sourcesPasteTextEl.value || '').trim();
+        if (!text) {
+          sourcesStatusEl.textContent = 'No text to ingest.';
+          return;
+        }
+
+        const title = String(sourcesPasteTitleEl.value || '').trim();
+        const slug = slugifyForPath(title || text.slice(0, 80));
+        const rel = 'pasted/' + tsForPath() + '_' + slug + '.md';
+
+        ingestPasteBtn.disabled = true;
+        ingestSourcesBtn.disabled = true;
+        clearSourcesBtn.disabled = true;
+        clearPasteBtn.disabled = true;
+        sourcesStatusEl.textContent = 'Ingesting pasted text...';
+
+        try {
+          const model = getSelectedModel();
+          const meta = currentSourcesMeta();
+          const resp = await postJson('/api/sources/ingest', { model, meta, files: [{ path: rel, content: text }] });
+          if (resp && resp.error) {
+            sourcesStatusEl.textContent = 'Error: ' + resp.error;
+            return;
+          }
+          const createdMem = (resp.createdMemories || []).length;
+          const createdSrc = (resp.createdSources || []).length;
+          sourcesStatusEl.textContent = 'Done. Created ' + createdMem + ' memory notes; stored ' + createdSrc + ' source file(s).';
+        } finally {
+          ingestPasteBtn.disabled = false;
+          ingestSourcesBtn.disabled = false;
+          clearSourcesBtn.disabled = false;
+          clearPasteBtn.disabled = false;
+        }
+      };
+
+      clearPasteBtn.onclick = () => {
+        sourcesPasteTitleEl.value = '';
+        sourcesPasteTextEl.value = '';
       };
 
       // Persist model selection (radio buttons).

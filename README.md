@@ -96,6 +96,10 @@ Put these in `.env` (or real env vars). See `env.example`.
    - if prompt asks for “verbatim / quote / full text”: include up to 20k chars
 5. **Answer call** → response + `===CAPTURE=== ...` (auto-capture writes to inbox and updates embeddings)
 
+Implementation detail (UI):
+- Work runs as **plan → answer** (`/api/work/plan` then `/api/work/answer`) so the UI can show “Used memories/sources” before the final response.
+- `/api/work/answer` supports **cache-miss recovery** (server restart between calls) via `planEcho`.
+
 ### Work context composition (fact-first + small preferences slice)
 - Work includes **mostly factual/project context** plus a tiny **preferences slice** (style/habits), selected by tags (`style`, `preference`, `habits`) and capped to a small fraction of the memory budget.
 
@@ -125,10 +129,14 @@ UI shows:
 - It cannot edit `enkidu.js` or the generated caches.
 - After dream edits, embeddings are refreshed incrementally (hash-based).
 
+Implementation detail (UI):
+- Dream runs as **plan → execute** (`/api/dream/plan` then `/api/dream/execute`) with an elapsed-time ticker.
+- `/api/dream/execute` supports **cache-miss recovery** (server restart between calls).
+
 ## Sources (ingest)
 UI “Sources (ingest)”:
-- select a folder of `.md` files (subfolders allowed)
-- click **Ingest**
+- select a folder of `.md` files (subfolders allowed), or paste plain text
+- click **Ingest** / **Ingest text**
 - local mode server writes:
   - verbatim store: `memories/sources/verbatim/*.md` (read-only)
   - curated memory notes filed to `memories/{inbox,people,projects,howto}/`
