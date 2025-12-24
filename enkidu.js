@@ -327,6 +327,91 @@ function cosineSim(a, b) {
   return dot(a, b) / (l2norm(a) * l2norm(b));
 }
 
+function isCuratableMemoryPath(rel) {
+  const p = String(rel || "").replaceAll("\\", "/");
+  if (!p.toLowerCase().startsWith("memories/") || !p.toLowerCase().endsWith(".md")) return false;
+  if (p.toLowerCase().startsWith("memories/sources/verbatim/")) return false; // read-only sources
+  if (p.toLowerCase().startsWith("memories/diary/")) return false; // diary is auto/log
+  return true;
+}
+
+function buildDuplicateReport({ entries, embeddingsCache }) {
+  const cacheItems = embeddingsCache?.items || {};
+  const threshold = Math.max(0.90, Math.min(0.999, Number(process.env.ENKIDU_DEDUPE_SIM_THRESHOLD || 0.985)));
+  const maxPairs = Math.max(10, Math.min(200, Number(process.env.ENKIDU_DEDUPE_MAX_PAIRS || 60)));
+  const maxComparisons = Math.max(500, Math.min(50000, Number(process.env.ENKIDU_DEDUPE_MAX_COMPARISONS || 12000)));
+
+  const entryByPath = new Map();
+  for (const e of Array.isArray(entries) ? entries : []) {
+    const rel = String(e?.path || "").replaceAll("\\", "/");
+    if (!rel) continue;
+    entryByPath.set(rel, e);
+  }
+
+  // Exact duplicates via body hash stored in embeddings cache.
+  const byHash = new Map(); // hash -> [path]
+  for (const rel of entryByPath.keys()) {
+    if (!isCuratableMemoryPath(rel)) continue;
+    const h = cacheItems?.[rel]?.hash;
+    if (!h) continue;
+    if (!byHash.has(h)) byHash.set(h, []);
+    byHash.get(h).push(rel);
+  }
+  const exact_same_hash = [];
+  for (const [hash, paths] of byHash.entries()) {
+    if ((paths || []).length <= 1) continue;
+    exact_same_hash.push({ hash, paths: paths.slice().sort() });
+  }
+  exact_same_hash.sort((a, b) => (b.paths?.length || 0) - (a.paths?.length || 0));
+
+  // Near-duplicates: only compare within title-slug groups to avoid O(n^2) blowups.
+  const groups = new Map(); // key -> [path]
+  for (const [rel, e] of entryByPath.entries()) {
+    if (!isCuratableMemoryPath(rel)) continue;
+    const title = String(e?.title || "").trim();
+    const key = slugify(title).slice(0, 80) || "untitled";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(rel);
+  }
+
+  let comparisons = 0;
+  const near_duplicates = [];
+  for (const paths of groups.values()) {
+    if (!paths || paths.length <= 1) continue;
+    // cap per-group work
+    const ps = paths.slice(0, 12);
+    for (let i = 0; i < ps.length; i++) {
+      for (let j = i + 1; j < ps.length; j++) {
+        if (comparisons++ > maxComparisons) break;
+        const a = ps[i];
+        const b = ps[j];
+        const va = cacheItems?.[a]?.vector;
+        const vb = cacheItems?.[b]?.vector;
+        if (!Array.isArray(va) || !Array.isArray(vb)) continue;
+        const score = cosineSim(va, vb);
+        if (score < threshold) continue;
+        const ea = entryByPath.get(a) || {};
+        const eb = entryByPath.get(b) || {};
+        near_duplicates.push({
+          score: Math.round(score * 10000) / 10000,
+          a: { path: a, title: ea.title || "", updated: ea.updated || "", importance: ea.importance ?? 0 },
+          b: { path: b, title: eb.title || "", updated: eb.updated || "", importance: eb.importance ?? 0 },
+        });
+        if (near_duplicates.length >= maxPairs) break;
+      }
+      if (comparisons > maxComparisons || near_duplicates.length >= maxPairs) break;
+    }
+    if (comparisons > maxComparisons || near_duplicates.length >= maxPairs) break;
+  }
+  near_duplicates.sort((x, y) => (y.score || 0) - (x.score || 0));
+
+  return {
+    params: { threshold, maxPairs, maxComparisons, comparisons },
+    exact_same_hash: exact_same_hash.slice(0, 30),
+    near_duplicates: near_duplicates.slice(0, maxPairs),
+  };
+}
+
 async function appendSessionEvent(role, content, meta = {}) {
   if (isSupabaseMode()) return await sbInsertSessionEvent(role, content, meta);
   await ensureDirs();
@@ -1478,6 +1563,16 @@ async function cmdDream(args = {}) {
     });
   }
 
+  // Optional: provide duplicate candidates to help dream consolidate/delete redundancy.
+  // We keep the executor dumb: it only *reports* possible duplicates; the model decides.
+  let duplicate_report = null;
+  try {
+    const emb = await loadEmbeddingsCache();
+    if (emb && emb.items) duplicate_report = buildDuplicateReport({ entries, embeddingsCache: emb });
+  } catch {
+    duplicate_report = null;
+  }
+
   const instructionFiles = [];
   for (const rel of ["instructions/work.md", "instructions/dream.md"]) {
     const abs = path.join(REPO_ROOT, rel);
@@ -1492,6 +1587,7 @@ async function cmdDream(args = {}) {
     writable_roots: ["memories/", "instructions/"],
     note_count: files.length,
     files,
+    duplicate_report,
     instructions: instructionFiles,
     output_contract: {
       ops: [
