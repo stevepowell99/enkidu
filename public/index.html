@@ -118,6 +118,10 @@
                 </div>
                 <div class="col-12 col-sm-6"></div>
               </div>
+              <div class="form-check mb-2">
+                <input class="form-check-input" type="checkbox" id="debugLog">
+                <label class="form-check-label small text-muted" for="debugLog">Debug: log full Work payloads to JS console (planEcho.userContent etc.)</label>
+              </div>
               <div id="chatHistory" class="border rounded bg-white p-2 mb-2" style="height: 420px; overflow-y: auto;"></div>
               <div class="mb-2">
                 <textarea id="workPrompt" class="form-control" rows="3" placeholder="Message (Enter to send, Shift+Enter for newline)..."></textarea>
@@ -326,10 +330,24 @@
 
       async function postJson(url, obj) {
         try {
+          if (isDebugLogEnabled()) {
+            console.groupCollapsed('[enkidu] POST ' + url);
+            console.log('request', obj);
+          }
           const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(obj) });
           const text = await r.text();
-          try { return JSON.parse(text); } catch { return { error: text || ('HTTP ' + r.status) }; }
+          let out;
+          try { out = JSON.parse(text); } catch { out = { error: text || ('HTTP ' + r.status) }; }
+          if (isDebugLogEnabled()) {
+            console.log('response', out);
+            console.groupEnd();
+          }
+          return out;
         } catch (e) {
+          if (isDebugLogEnabled()) {
+            console.warn('[enkidu] POST failed ' + url, e);
+            try { console.groupEnd(); } catch {}
+          }
           return { error: (e && e.message) ? e.message : String(e) };
         }
       }
@@ -353,6 +371,17 @@
       const usedMemoriesEl = document.getElementById('usedMemories');
       const autoCaptureStatusEl = document.getElementById('autoCaptureStatus');
       const usedSourcesEl = document.getElementById('usedSources');
+      const debugLogEl = document.getElementById('debugLog');
+
+      function isDebugLogEnabled() {
+        return !!(debugLogEl && debugLogEl.checked);
+      }
+
+      // Persist debug checkbox (browser-local).
+      debugLogEl.checked = (localStorage.getItem('enkidu.debugLog') === 'true');
+      debugLogEl.addEventListener('change', () => {
+        localStorage.setItem('enkidu.debugLog', debugLogEl.checked ? 'true' : 'false');
+      });
 
       const sourcesFolderEl = document.getElementById('sourcesFolder');
       const ingestSourcesBtn = document.getElementById('ingestSourcesBtn');
@@ -729,6 +758,11 @@
             resp = plan;
             return;
           }
+          if (isDebugLogEnabled()) {
+            window.__enkidu_lastWorkPlan = plan;
+            window.__enkidu_lastWorkPlanEcho = plan.planEcho;
+            console.log('[enkidu] saved window.__enkidu_lastWorkPlanEcho (includes userContent)');
+          }
 
           // Update retrieval UI before the model answers.
           if (!runNow && plan && Array.isArray(plan.usedMemories)) {
@@ -757,6 +791,10 @@
           setTypingIndicatorLabel('Answering (mem ' + memN + '/' + memCap + ', src ' + srcN + '/' + srcCap + (flags.length ? '; ' + flags.join('+') : '') + ')');
 
           resp = await postJson('/api/work/answer', { planToken: plan.planToken, planEcho: plan.planEcho });
+          if (isDebugLogEnabled()) {
+            window.__enkidu_lastWorkAnswer = resp;
+            console.log('[enkidu] saved window.__enkidu_lastWorkAnswer');
+          }
         } finally {
           workBtn.disabled = false;
           workBtnNow.disabled = false;
