@@ -1206,7 +1206,14 @@ function normaliseHistory(history) {
 const WORK_PLAN_CACHE = new Map(); // planToken -> { createdAtMs, plan }
 const WORK_PLAN_TTL_MS = 2 * 60 * 1000;
 
+const DREAM_PLAN_CACHE = new Map(); // planToken -> { createdAtMs, plan }
+const DREAM_PLAN_TTL_MS = 10 * 60 * 1000;
+
 function makeWorkPlanToken() {
+  return crypto.randomBytes(16).toString("hex");
+}
+
+function makeDreamPlanToken() {
   return crypto.randomBytes(16).toString("hex");
 }
 
@@ -1214,6 +1221,13 @@ function pruneWorkPlanCache() {
   const now = Date.now();
   for (const [k, v] of WORK_PLAN_CACHE.entries()) {
     if (!v || now - (v.createdAtMs || 0) > WORK_PLAN_TTL_MS) WORK_PLAN_CACHE.delete(k);
+  }
+}
+
+function pruneDreamPlanCache() {
+  const now = Date.now();
+  for (const [k, v] of DREAM_PLAN_CACHE.entries()) {
+    if (!v || now - (v.createdAtMs || 0) > DREAM_PLAN_TTL_MS) DREAM_PLAN_CACHE.delete(k);
   }
 }
 
@@ -1732,6 +1746,222 @@ async function cmdDream(args = {}) {
   console.log(`Dream complete. Diary: ${safeRelPath(diaryPath)}`);
 }
 
+async function dreamPlanOnly({ model }) {
+  await ensureDirs();
+  const instruction = await readInstruction(DREAM_INSTRUCTION_FILE);
+  const m = String(model || "").trim();
+
+  const DREAM_CATALOG_MAX = Math.max(200, Math.min(5000, Number(process.env.ENKIDU_DREAM_CATALOG_MAX || 2000)));
+  const DREAM_READ_MAX = Math.max(10, Math.min(120, Number(process.env.ENKIDU_DREAM_READ_MAX || 40)));
+
+  const idx = await loadIndex();
+  const entries = idx.entries || [];
+
+  const catalog = [];
+  for (const e of entries.slice(0, DREAM_CATALOG_MAX)) {
+    const rel = String(e?.path || "").replaceAll("\\", "/");
+    if (!rel) continue;
+    if (!rel.toLowerCase().endsWith(".md")) continue;
+    catalog.push({
+      path: rel,
+      title: e.title || "",
+      tags: e.tags || [],
+      importance: Number.isFinite(Number(e.importance)) ? Number(e.importance) : 0,
+      created: e.created || "",
+      updated: e.updated || "",
+      preview: e.preview || "",
+    });
+  }
+
+  let duplicate_report = null;
+  try {
+    const emb = await loadEmbeddingsCache();
+    if (emb && emb.items) duplicate_report = buildDuplicateReport({ entries, embeddingsCache: emb });
+  } catch {
+    duplicate_report = null;
+  }
+
+  const instructionFiles = [];
+  for (const rel of ["instructions/work.md", "instructions/dream.md"]) {
+    const abs = path.join(REPO_ROOT, rel);
+    assertWithinWritableRoots(abs);
+    if (!fs.existsSync(abs)) continue;
+    const content = await readFileUtf8(abs);
+    instructionFiles.push({ path: rel, content });
+  }
+
+  const step1 = {
+    now: nowIso(),
+    writable_roots: ["memories/", "instructions/"],
+    note_count_total: entries.length,
+    note_count_included_in_catalog: catalog.length,
+    note_catalog_truncated: entries.length > catalog.length,
+    catalog,
+    duplicate_report,
+    instructions: instructionFiles,
+    output_contract: {
+      want_read: ["memories/path.md", "instructions/work.md"],
+      note: "one short sentence why you want these files",
+    },
+    constraints: {
+      max_files_to_read: DREAM_READ_MAX,
+      do_not_read_or_modify: ["memories/sources/verbatim/* (read-only)"],
+    },
+  };
+
+  const messages1 = [
+    { role: "system", content: instruction },
+    {
+      role: "user",
+      content:
+        "You are running DREAM (step 1/2).\n\n" +
+        "Pick up to max_files_to_read files you need to read fully to make good edits.\n" +
+        "Return ONLY valid JSON matching output_contract.\n\n" +
+        JSON.stringify(step1, null, 2),
+    },
+  ];
+
+  const raw1 = await openaiChat(messages1, { model: m });
+  const parsed1 = safeJsonParse(raw1);
+  const wantReadRaw = Array.isArray(parsed1?.want_read) ? parsed1.want_read : [];
+
+  const wantRead = [];
+  const seen = new Set();
+  for (const p of wantReadRaw) {
+    if (wantRead.length >= DREAM_READ_MAX) break;
+    const rel = String(p || "").replaceAll("\\", "/").trim();
+    if (!rel) continue;
+    if (seen.has(rel)) continue;
+    if (!(rel.toLowerCase().startsWith("memories/") || rel.toLowerCase().startsWith("instructions/"))) continue;
+    if (rel.toLowerCase().startsWith("memories/sources/verbatim/")) continue;
+    const abs = path.join(REPO_ROOT, rel);
+    assertWithinWritableRoots(abs);
+    try {
+      assertNotProtectedWritable(abs);
+    } catch {
+      continue;
+    }
+    if (!fs.existsSync(abs)) continue;
+    seen.add(rel);
+    wantRead.push(rel);
+  }
+
+  const plan = {
+    instruction,
+    model: m,
+    entriesCount: entries.length,
+    catalog,
+    duplicate_report,
+    instructionFiles,
+    wantRead,
+    DREAM_READ_MAX,
+  };
+
+  return {
+    plan,
+    wantRead,
+    note: String(parsed1?.note || "").trim(),
+    summary: {
+      note_count_total: entries.length,
+      catalog_count: catalog.length,
+      want_read_count: wantRead.length,
+      duplicates: {
+        exact_groups: Array.isArray(duplicate_report?.exact_same_hash) ? duplicate_report.exact_same_hash.length : 0,
+        near_pairs: Array.isArray(duplicate_report?.near_duplicates) ? duplicate_report.near_duplicates.length : 0,
+      },
+    },
+  };
+}
+
+async function dreamExecuteFromPlan(plan) {
+  await ensureDirs();
+  const instruction = String(plan?.instruction || "");
+  const model = String(plan?.model || "").trim();
+  const catalog = Array.isArray(plan?.catalog) ? plan.catalog : [];
+  const duplicate_report = plan?.duplicate_report || null;
+  const wantRead = Array.isArray(plan?.wantRead) ? plan.wantRead : [];
+
+  const selected_files = [];
+  for (const rel of wantRead) {
+    const abs = path.join(REPO_ROOT, rel);
+    if (!fs.existsSync(abs)) continue;
+    const content = await readFileUtf8(abs);
+    selected_files.push({ path: rel, content });
+  }
+
+  const step2 = {
+    now: nowIso(),
+    writable_roots: ["memories/", "instructions/"],
+    note_count_total: Number(plan?.entriesCount) || 0,
+    catalog,
+    duplicate_report,
+    selected_files,
+    output_contract: {
+      ops: [
+        { op: "mkdir", path: "memories/someFolder" },
+        { op: "write", path: "memories/path.md", content: "..." },
+        { op: "move", from: "memories/a.md", to: "memories/b.md" },
+        { op: "delete", path: "memories/old.md" },
+      ],
+      diary: "markdown string describing what you did and why",
+    },
+  };
+
+  const messages2 = [
+    { role: "system", content: instruction },
+    {
+      role: "user",
+      content:
+        "You are running DREAM (step 2/2).\n\n" +
+        "You have a catalog of all notes (metadata+previews) and full contents for selected_files.\n" +
+        "Return ONLY valid JSON matching output_contract.\n\n" +
+        JSON.stringify(step2, null, 2),
+    },
+  ];
+
+  const raw = await openaiChat(messages2, { model });
+  const parsed = safeJsonParse(raw);
+  if (!parsed) throw new Error("Dream did not return valid JSON.");
+
+  const ops = Array.isArray(parsed.ops) ? parsed.ops : [];
+  const diary = String(parsed.diary || "").trim();
+  if (!diary) throw new Error("Dream JSON missing diary.");
+
+  const applied = await applyDreamOps(ops);
+  const newEntries = await buildIndex();
+  await writeIndex(newEntries);
+
+  const diaryTs = filenameTimestamp();
+  const diaryPathAbs = path.join(MEMORIES_DIR, "diary", `${diaryTs}_dream.md`.toLowerCase());
+  const diaryMd = [
+    "---",
+    `title: Dream diary (${nowIso()})`,
+    `created: ${nowIso()}`,
+    "tags: diary, dream",
+    "source: dream",
+    "---",
+    "",
+    diary,
+    "",
+    "## Applied ops",
+    "",
+    "```json",
+    JSON.stringify(applied, null, 2),
+    "```",
+    "",
+  ].join("\n");
+  await writeFileUtf8(diaryPathAbs, diaryMd);
+
+  await cmdEmbed({});
+
+  return {
+    diaryPath: safeRelPath(diaryPathAbs),
+    diary: diaryMd,
+    applied,
+    selected_files_count: selected_files.length,
+  };
+}
+
 async function cmdDreamSupabase(args = {}) {
   // Supabase-backed dream: only operates on memories table (instructions are read-only in hosted).
   const instruction = await readInstruction(DREAM_INSTRUCTION_FILE);
@@ -2195,6 +2425,36 @@ export async function apiHandleRequest({ method, pathname, searchParams, headers
   // Purpose: shared API handler for both the local Node server and Netlify Functions.
   const m = String(method || "GET").toUpperCase();
   const p = String(pathname || "/");
+
+  if (m === "POST" && p === "/api/dream/plan") {
+    const data = String(headers?.["content-type"] || "").includes("application/json")
+      ? safeJsonParse(bodyText) || {}
+      : parseFormUrlEncoded(bodyText);
+    const model = String(data.model || "").trim();
+
+    pruneDreamPlanCache();
+    const { plan, wantRead, note, summary } = await dreamPlanOnly({ model });
+    const planToken = makeDreamPlanToken();
+    DREAM_PLAN_CACHE.set(planToken, { createdAtMs: Date.now(), plan });
+
+    return { statusCode: 200, json: { planToken, wantRead, note, summary } };
+  }
+
+  if (m === "POST" && p === "/api/dream/execute") {
+    const data = String(headers?.["content-type"] || "").includes("application/json")
+      ? safeJsonParse(bodyText) || {}
+      : parseFormUrlEncoded(bodyText);
+    const planToken = String(data.planToken || "").trim();
+    if (!planToken) return { statusCode: 400, json: { error: "Missing planToken" } };
+
+    pruneDreamPlanCache();
+    const hit = DREAM_PLAN_CACHE.get(planToken);
+    if (!hit || !hit.plan) return { statusCode: 400, json: { error: "Unknown/expired planToken" } };
+
+    const result = await dreamExecuteFromPlan(hit.plan);
+    DREAM_PLAN_CACHE.delete(planToken);
+    return { statusCode: 200, json: { ok: true, ...result } };
+  }
 
   if (m === "POST" && p === "/api/work/plan") {
     const data = String(headers?.["content-type"] || "").includes("application/json")

@@ -628,9 +628,50 @@
       };
 
       dreamBtn.onclick = async () => {
-        diaryOut.textContent = 'Dreaming...';
-        const resp = await postJson('/api/dream', { model: getSelectedModel() });
-        diaryOut.textContent = resp.ok ? 'Dream complete. Refresh diary list.' : (resp.error || 'Error');
+        dreamBtn.disabled = true;
+        refreshDiaryBtn.disabled = true;
+        diaryOut.textContent = 'Dream: planning (catalog + duplicates)...';
+        try {
+          const plan = await postJson('/api/dream/plan', { model: getSelectedModel() });
+          if (plan && plan.error) {
+            diaryOut.textContent = plan.error || 'Error';
+            return;
+          }
+          const sum = plan.summary || {};
+          const wr = Array.isArray(plan.wantRead) ? plan.wantRead : [];
+          diaryOut.textContent =
+            'Dream plan complete.\n' +
+            '- notes: ' + (sum.note_count_total ?? '?') + '\n' +
+            '- catalog: ' + (sum.catalog_count ?? '?') + '\n' +
+            '- reading: ' + wr.length + ' file(s)\n' +
+            '- dupes: ' + ((sum.duplicates && sum.duplicates.exact_groups) ?? 0) + ' exact groups; ' +
+              ((sum.duplicates && sum.duplicates.near_pairs) ?? 0) + ' near pairs\n' +
+            (plan.note ? ('\nNote: ' + plan.note + '\n') : '') +
+            (wr.length ? ('\nWill read:\n' + wr.slice(0, 25).map(p => '- ' + p).join('\n') + (wr.length > 25 ? '\n- ...' : '') + '\n') : '');
+
+          diaryOut.textContent += '\nDream: executing (reading + applying ops + writing diary)...';
+          const exec = await postJson('/api/dream/execute', { planToken: plan.planToken });
+          if (exec && exec.error) {
+            diaryOut.textContent = exec.error || 'Error';
+            return;
+          }
+          // Refresh and display new diary immediately.
+          await refreshDiary();
+          if (exec && exec.diaryPath) {
+            const found = Array.from(diarySelect.options).find(o => o.value === exec.diaryPath);
+            if (found) {
+              diarySelect.value = exec.diaryPath;
+              diaryOut.textContent = exec.diary || 'Dream complete. Diary written: ' + exec.diaryPath;
+            } else {
+              diaryOut.textContent = exec.diary || ('Dream complete. Diary written: ' + exec.diaryPath);
+            }
+          } else {
+            diaryOut.textContent = exec && exec.diary ? exec.diary : 'Dream complete.';
+          }
+        } finally {
+          dreamBtn.disabled = false;
+          refreshDiaryBtn.disabled = false;
+        }
       };
 
       refreshDiaryBtn.onclick = refreshDiary;
