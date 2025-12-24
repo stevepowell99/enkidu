@@ -21,7 +21,12 @@ Goal: improve the organisation and quality of the memories folder over time.
 If `memories/inbox/` is non-empty, this is your most basic task:
 - Move inbox notes into the right folder (`people/`, `projects/`, `howto/`, `interests/`, etc.).
 - Merge near-duplicates, and delete redundant copies where safe.
-- Leave `memories/inbox/` empty if you can; otherwise leave only a small number of “needs user decision” items.
+- Leave `memories/inbox/` empty if you can.
+
+### Autonomy (no user feedback required)
+Do NOT ask the user for guidance during Dream.
+- Make best-effort choices and proceed.
+- If you are uncertain, move the note to `memories/cleanup/needs_review/` with clear tags (e.g. `needs_review`) and a brief explanation in the note content.
 
 ## Duplicates (optional)
 If the user context includes a `duplicate_report`:
