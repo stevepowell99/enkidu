@@ -1071,16 +1071,17 @@ async function retrieveTopMemoriesByEmbeddings(queries, topN) {
     let best = -1;
     for (const qv of qVecs) best = Math.max(best, cosineSim(qv, item.vector));
     const imp = Number.isFinite(Number(e.importance)) ? Number(e.importance) : 0;
-    scored.push([best + imp * IMPORTANCE_WEIGHT_EMBED, e]);
+    scored.push([best + imp * IMPORTANCE_WEIGHT_EMBED, best, e]);
   }
   scored.sort((a, b) => b[0] - a[0]);
 
-  const picked = scored.slice(0, topN).map((x) => x[1]);
+  const picked = scored.slice(0, topN).map((x) => ({ entry: x[2], sim: x[1] }));
   const out = [];
-  for (const e of picked) {
+  for (const it of picked) {
+    const e = it.entry;
     const p = path.join(REPO_ROOT, e.path);
     const text = await readFileUtf8(p);
-    out.push({ entry: e, text });
+    out.push({ entry: e, text, sim: it.sim });
   }
   return out;
 }
@@ -1442,6 +1443,50 @@ async function workPlanCore({ prompt, model, history, runNow }) {
     const candidateN = Math.max(memTopN, factCap + prefCap + 8);
     const topEmb = await retrieveTopMemoriesByEmbeddings(queries, candidateN);
     top = topEmb && topEmb.length ? topEmb : await retrieveTopMemories(prompt, candidateN);
+
+    // Generic sanity re-rank: prefer memories that have lexical overlap with the prompt.
+    // This reduces "embedding noise" where an unrelated but important memory is returned.
+    const promptTokens = tokenize(prompt);
+    function fuzzyOverlapCount(aSet, bSet) {
+      const a = Array.from(aSet);
+      const b = Array.from(bSet);
+      let c = 0;
+      for (const x of a) {
+        if (!x) continue;
+        if (bSet.has(x)) {
+          c++;
+          continue;
+        }
+        if (x.length < 4) continue;
+        for (const y of b) {
+          if (!y || y.length < 4) continue;
+          if (y.startsWith(x) || x.startsWith(y)) {
+            c++;
+            break;
+          }
+        }
+      }
+      return c;
+    }
+
+    top.sort((a, b) => {
+      const aText = (a && typeof a.text === "string") ? a.text : "";
+      const bText = (b && typeof b.text === "string") ? b.text : "";
+      const aEntry = a && a.entry ? a.entry : {};
+      const bEntry = b && b.entry ? b.entry : {};
+      const aBag = tokenize(String(aEntry.title || "") + " " + String((aEntry.tags || []).join(" ")) + " " + aText.slice(0, 2000));
+      const bBag = tokenize(String(bEntry.title || "") + " " + String((bEntry.tags || []).join(" ")) + " " + bText.slice(0, 2000));
+      const ao = fuzzyOverlapCount(promptTokens, aBag);
+      const bo = fuzzyOverlapCount(promptTokens, bBag);
+      if (ao !== bo) return bo - ao;
+      const as = Number.isFinite(Number(a.sim)) ? Number(a.sim) : -1;
+      const bs = Number.isFinite(Number(b.sim)) ? Number(b.sim) : -1;
+      if (as !== bs) return bs - as;
+      const ai = Number.isFinite(Number(aEntry.importance)) ? Number(aEntry.importance) : 0;
+      const bi = Number.isFinite(Number(bEntry.importance)) ? Number(bEntry.importance) : 0;
+      if (ai !== bi) return bi - ai;
+      return String(bEntry.updated || "").localeCompare(String(aEntry.updated || ""));
+    });
   }
 
   // Preferences slice: tiny, mostly-stable guidance (style/habits).
