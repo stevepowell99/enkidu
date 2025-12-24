@@ -1254,6 +1254,8 @@ async function workPlanCore({ prompt, model, history, runNow }) {
   const instruction = await readInstruction(WORK_INSTRUCTION_FILE);
   const fast = Boolean(runNow);
   const route = fast ? { needRecency: false, needExpansion: false } : heuristicRoute(prompt);
+  const memTopN = Math.max(0, Math.min(50, Number(process.env.ENKIDU_WORK_MEM_TOP || 5)));
+  const srcTopN = Math.max(0, Math.min(20, Number(process.env.ENKIDU_WORK_SRC_TOP || 3)));
 
   // Recency (episodic memory): always available across sessions.
   const recentEvents = route.needRecency ? await loadRecentSessionEvents(30) : [];
@@ -1266,8 +1268,8 @@ async function workPlanCore({ prompt, model, history, runNow }) {
   // Semantic retrieval: embeddings if available, otherwise keyword fallback inside retrieveTopMemories().
   let top = [];
   if (!fast) {
-    const topEmb = await retrieveTopMemoriesByEmbeddings(queries, 5);
-    top = topEmb && topEmb.length ? topEmb : await retrieveTopMemories(prompt, 5);
+    const topEmb = await retrieveTopMemoriesByEmbeddings(queries, memTopN);
+    top = topEmb && topEmb.length ? topEmb : await retrieveTopMemories(prompt, memTopN);
   }
 
   const memChunks = top.map(({ entry, text }) => {
@@ -1287,7 +1289,7 @@ async function workPlanCore({ prompt, model, history, runNow }) {
   if (memChunks.length) userParts.push("Relevant memories (may be incomplete):\n\n" + memChunks.join("\n\n"));
 
   // Read-only sources (server-side verbatim store + embeddings).
-  const storedSources = fast ? [] : await retrieveTopSourcesByEmbeddings(queries, 3);
+  const storedSources = fast ? [] : await retrieveTopSourcesByEmbeddings(queries, srcTopN);
   if (storedSources.length) {
     const maxChars = wantsVerbatimSources(prompt) ? 20000 : 4000;
     const srcChunks = storedSources
@@ -1321,6 +1323,7 @@ async function workPlanCore({ prompt, model, history, runNow }) {
     route,
     queries,
     fast,
+    limits: { memTopN, srcTopN },
   };
 }
 
@@ -2567,6 +2570,7 @@ export async function apiHandleRequest({ method, pathname, searchParams, headers
         route: plan.route,
         queries: plan.queries,
         fast: plan.fast,
+        limits: plan.limits || { memTopN: 5, srcTopN: 3 },
       },
     };
   }

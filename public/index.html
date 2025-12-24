@@ -555,10 +555,13 @@
           const r = (plan && plan.route) ? plan.route : {};
           const memN = (plan && Array.isArray(plan.usedMemories)) ? plan.usedMemories.length : 0;
           const srcN = (plan && Array.isArray(plan.usedSources)) ? plan.usedSources.length : 0;
+          const lim = (plan && plan.limits) ? plan.limits : {};
+          const memCap = (lim && typeof lim.memTopN !== 'undefined') ? lim.memTopN : 5;
+          const srcCap = (lim && typeof lim.srcTopN !== 'undefined') ? lim.srcTopN : 3;
           const flags = [];
           if (r.needRecency) flags.push('recency');
           if (r.needExpansion) flags.push('expand');
-          setTypingIndicatorLabel('Answering (mem ' + memN + ', src ' + srcN + (flags.length ? '; ' + flags.join('+') : '') + ')');
+          setTypingIndicatorLabel('Answering (mem ' + memN + '/' + memCap + ', src ' + srcN + '/' + srcCap + (flags.length ? '; ' + flags.join('+') : '') + ')');
 
           resp = await postJson('/api/work/answer', { planToken: plan.planToken });
         } finally {
