@@ -1226,6 +1226,7 @@ const WORK_PLAN_TTL_MS = 2 * 60 * 1000;
 
 const DREAM_PLAN_CACHE = new Map(); // planToken -> { createdAtMs, plan }
 const DREAM_PLAN_TTL_MS = 10 * 60 * 1000;
+let EMBED_REFRESH_RUNNING = false;
 
 function makeWorkPlanToken() {
   return crypto.randomBytes(16).toString("hex");
@@ -1420,6 +1421,22 @@ function formatOpenAiHttpError(status, raw) {
     return `OpenAI rate limit (HTTP 429). Please retry shortly. Details: ${snippet}`;
   }
   return `OpenAI HTTP ${s}: ${snippet}`;
+}
+
+function scheduleEmbedRefresh(reason = "background") {
+  if (EMBED_REFRESH_RUNNING) return false;
+  EMBED_REFRESH_RUNNING = true;
+  setTimeout(async () => {
+    try {
+      await cmdEmbed({});
+      eprint(`[embed] refresh complete (${reason})`);
+    } catch (e) {
+      eprint(`[embed] refresh failed (${reason}):`, e?.message || e);
+    } finally {
+      EMBED_REFRESH_RUNNING = false;
+    }
+  }, 0);
+  return true;
 }
 
 async function openaiChat(messages, opts = {}) {
@@ -1937,13 +1954,63 @@ async function dreamExecuteFromPlan(plan) {
     },
   ];
 
-  const raw = await openaiChat(messages2, { model });
-  const parsed = safeJsonParse(raw);
+  let raw = await openaiChat(messages2, { model });
+  let parsed = safeJsonParse(raw);
+  if (!parsed) {
+    // One retry with a stronger reminder if JSON is invalid.
+    const retryMsgs = [
+      { role: "system", content: instruction },
+      {
+        role: "user",
+        content:
+          "Your previous response was NOT valid JSON.\n\n" +
+          "Return ONLY valid JSON matching output_contract.\n" +
+          "It MUST include BOTH keys: ops (array) and diary (non-empty string).\n\n" +
+          "Previous response (truncated):\n" +
+          truncateForError(raw, 2000) +
+          "\n\n" +
+          JSON.stringify(step2, null, 2),
+      },
+    ];
+    raw = await openaiChat(retryMsgs, { model });
+    parsed = safeJsonParse(raw);
+  }
   if (!parsed) throw new Error("Dream did not return valid JSON.");
 
-  const ops = Array.isArray(parsed.ops) ? parsed.ops : [];
-  const diary = String(parsed.diary || "").trim();
-  if (!diary) throw new Error("Dream JSON missing diary.");
+  let ops = Array.isArray(parsed.ops) ? parsed.ops : [];
+  let diary = String(parsed.diary || "").trim();
+
+  if (!diary) {
+    // One retry focused on diary only (keep it small).
+    const retryDiaryMsgs = [
+      { role: "system", content: instruction },
+      {
+        role: "user",
+        content:
+          "Your JSON is missing a non-empty `diary` string.\n\n" +
+          "Return ONLY valid JSON with keys: ops (array) and diary (non-empty string).\n" +
+          "Use the same ops unless you must adjust them for consistency.\n\n" +
+          "Your previous JSON (truncated):\n" +
+          truncateForError(raw, 3000),
+      },
+    ];
+    const rawDiary = await openaiChat(retryDiaryMsgs, { model });
+    const parsedDiary = safeJsonParse(rawDiary);
+    if (parsedDiary) {
+      ops = Array.isArray(parsedDiary.ops) ? parsedDiary.ops : ops;
+      diary = String(parsedDiary.diary || "").trim();
+    }
+  }
+
+  if (!diary) {
+    // Final fallback: never crash the whole dream.
+    diary =
+      "Dream did not return a diary string. I proceeded with applying ops (if any) and recorded this fallback entry.\n\n" +
+      "## Model output (truncated)\n\n" +
+      "```text\n" +
+      truncateForError(raw, 6000) +
+      "\n```";
+  }
 
   const applied = await applyDreamOps(ops);
   const newEntries = await buildIndex();
@@ -1970,13 +2037,15 @@ async function dreamExecuteFromPlan(plan) {
   ].join("\n");
   await writeFileUtf8(diaryPathAbs, diaryMd);
 
-  await cmdEmbed({});
+  // Don't block UI on a potentially long embedding refresh; do it in the background.
+  const embedScheduled = scheduleEmbedRefresh("dream");
 
   return {
     diaryPath: safeRelPath(diaryPathAbs),
     diary: diaryMd,
     applied,
     selected_files_count: selected_files.length,
+    embedRefresh: embedScheduled ? "scheduled" : "already_running",
   };
 }
 

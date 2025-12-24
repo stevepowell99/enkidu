@@ -631,6 +631,15 @@
         dreamBtn.disabled = true;
         refreshDiaryBtn.disabled = true;
         diaryOut.textContent = 'Dream: planning (catalog + duplicates)...';
+        let ticker = null;
+        const started = Date.now();
+        function startTicker(prefix) {
+          if (ticker) clearInterval(ticker);
+          ticker = setInterval(() => {
+            const s = Math.floor((Date.now() - started) / 1000);
+            diaryOut.textContent = (prefix || diaryOut.textContent || 'Dream...') + '\n\n(elapsed: ' + s + 's)';
+          }, 1000);
+        }
         try {
           const plan = await postJson('/api/dream/plan', { model: getSelectedModel() });
           if (plan && plan.error) {
@@ -650,6 +659,7 @@
             (wr.length ? ('\nWill read:\n' + wr.slice(0, 25).map(p => '- ' + p).join('\n') + (wr.length > 25 ? '\n- ...' : '') + '\n') : '');
 
           diaryOut.textContent += '\nDream: executing (reading + applying ops + writing diary)...';
+          startTicker(diaryOut.textContent);
           const exec = await postJson('/api/dream/execute', { planToken: plan.planToken });
           if (exec && exec.error) {
             diaryOut.textContent = exec.error || 'Error';
@@ -668,7 +678,11 @@
           } else {
             diaryOut.textContent = exec && exec.diary ? exec.diary : 'Dream complete.';
           }
+          if (exec && exec.embedRefresh) {
+            diaryOut.textContent += '\n\n(embeddings refresh: ' + exec.embedRefresh + ')';
+          }
         } finally {
+          if (ticker) clearInterval(ticker);
           dreamBtn.disabled = false;
           refreshDiaryBtn.disabled = false;
         }
