@@ -17,6 +17,12 @@ Goal: improve the organisation and quality of the memories folder over time.
 - Rewrite note content to be clearer and more concise.
 - Add/clean front matter (title/created/tags/source/importance).
 
+## Inbox triage (default priority)
+If `memories/inbox/` is non-empty, this is your most basic task:
+- Move inbox notes into the right folder (`people/`, `projects/`, `howto/`, `interests/`, etc.).
+- Merge near-duplicates, and delete redundant copies where safe.
+- Leave `memories/inbox/` empty if you can; otherwise leave only a small number of “needs user decision” items.
+
 ## Duplicates (optional)
 If the user context includes a `duplicate_report`:
 - Prefer deleting/merging **exact duplicates** (same content hash) where safe.

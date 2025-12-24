@@ -1795,6 +1795,9 @@ async function dreamPlanOnly({ model }) {
   const idx = await loadIndex();
   const entries = idx.entries || [];
 
+  const inboxEntries = entries.filter((e) => String(e?.path || "").replaceAll("\\", "/").toLowerCase().startsWith("memories/inbox/"));
+  const inboxPaths = inboxEntries.map((e) => String(e?.path || "").replaceAll("\\", "/"));
+
   const catalog = [];
   for (const e of entries.slice(0, DREAM_CATALOG_MAX)) {
     const rel = String(e?.path || "").replaceAll("\\", "/");
@@ -1832,6 +1835,8 @@ async function dreamPlanOnly({ model }) {
     now: nowIso(),
     writable_roots: ["memories/", "instructions/"],
     note_count_total: entries.length,
+    inbox_count: inboxPaths.length,
+    inbox_paths: inboxPaths.slice(0, 120),
     note_count_included_in_catalog: catalog.length,
     note_catalog_truncated: entries.length > catalog.length,
     catalog,
@@ -1884,6 +1889,17 @@ async function dreamPlanOnly({ model }) {
     wantRead.push(rel);
   }
 
+  // Inbox is the default priority: if inbox has items and model picked nothing,
+  // force-read a batch of inbox notes so Dream has full text to triage.
+  if (!wantRead.length && inboxPaths.length) {
+    for (const rel of inboxPaths.slice(0, DREAM_READ_MAX)) {
+      if (wantRead.length >= DREAM_READ_MAX) break;
+      const abs = path.join(REPO_ROOT, rel);
+      if (!fs.existsSync(abs)) continue;
+      wantRead.push(rel);
+    }
+  }
+
   const plan = {
     instruction,
     model: m,
@@ -1893,6 +1909,7 @@ async function dreamPlanOnly({ model }) {
     instructionFiles,
     wantRead,
     DREAM_READ_MAX,
+    inboxCount: inboxPaths.length,
   };
 
   return {
@@ -2585,6 +2602,8 @@ export async function apiHandleRequest({ method, pathname, searchParams, headers
 
       const idx = await loadIndex();
       const entries = idx.entries || [];
+      const inboxEntries = entries.filter((e) => String(e?.path || "").replaceAll("\\", "/").toLowerCase().startsWith("memories/inbox/"));
+      const inboxPaths = inboxEntries.map((e) => String(e?.path || "").replaceAll("\\", "/"));
       const catalog = [];
       for (const e of entries.slice(0, DREAM_CATALOG_MAX)) {
         const rel = String(e?.path || "").replaceAll("\\", "/");
@@ -2638,6 +2657,16 @@ export async function apiHandleRequest({ method, pathname, searchParams, headers
         if (!fs.existsSync(abs)) continue;
         seen.add(rel);
         wantRead.push(rel);
+      }
+
+      // Inbox default: if client provided no wantRead and inbox has items, read a batch anyway.
+      if (!wantRead.length && inboxPaths.length) {
+        for (const rel of inboxPaths.slice(0, DREAM_READ_MAX)) {
+          if (wantRead.length >= DREAM_READ_MAX) break;
+          const abs = path.join(REPO_ROOT, rel);
+          if (!fs.existsSync(abs)) continue;
+          wantRead.push(rel);
+        }
       }
 
       const recoveredPlan = {
