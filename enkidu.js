@@ -567,12 +567,13 @@ async function cmdWork(args) {
   process.stdout.write(String(answer).trim() + "\n");
 }
 
-async function cmdDream() {
+async function cmdDream(args = {}) {
   // Soft dream: LLM decides what to do, via editable instructions.
   // Code stays dumb: it provides context, validates ops, applies ops under memories/, writes diary entry.
   await ensureDirs();
 
   const instruction = await readInstruction(DREAM_INSTRUCTION_FILE);
+  const model = String(args.model || "").trim();
 
   // Provide the model with full file contents it is allowed to operate on.
   const idx = await loadIndex();
@@ -632,7 +633,7 @@ async function cmdDream() {
     },
   ];
 
-  const raw = await openaiChat(messages);
+  const raw = await openaiChat(messages, { model });
   const parsed = safeJsonParse(raw);
   if (!parsed) throw new Error("Dream did not return valid JSON.");
 
@@ -806,7 +807,12 @@ async function cmdServe(args) {
       }
 
       if (req.method === "POST" && u.pathname === "/api/dream") {
-        await cmdDream();
+        const body = await readRequestBody(req);
+        const data = req.headers["content-type"]?.includes("application/json")
+          ? safeJsonParse(body) || {}
+          : parseFormUrlEncoded(body);
+        const model = String(data.model || "").trim();
+        await cmdDream({ model });
         return sendJson(res, 200, { ok: true });
       }
 
@@ -903,32 +909,11 @@ async function cmdServeWatch(args) {
 
 function renderHtml() {
   // Single-file UI. Bootstrap via CDN.
-  const modelOptions = [
-    { id: "", label: "(default)" },
-    { id: "gpt-5.2", label: "gpt-5.2 (out: $14.00/1M)" },
-    { id: "gpt-5.1", label: "gpt-5.1 (out: $10.00/1M)" },
-    { id: "gpt-5", label: "gpt-5 (out: $10.00/1M)" },
-    { id: "gpt-5-mini", label: "gpt-5-mini (out: $2.00/1M)" },
-    { id: "gpt-5-nano", label: "gpt-5-nano (out: $0.40/1M)" },
-    { id: "gpt-5.2-chat-latest", label: "gpt-5.2-chat-latest (out: $14.00/1M)" },
-    { id: "gpt-5.1-chat-latest", label: "gpt-5.1-chat-latest (out: $10.00/1M)" },
-    { id: "gpt-5-chat-latest", label: "gpt-5-chat-latest (out: $10.00/1M)" },
-    { id: "gpt-5.1-codex-max", label: "gpt-5.1-codex-max (out: $10.00/1M)" },
-    { id: "gpt-5.1-codex", label: "gpt-5.1-codex (out: $10.00/1M)" },
-    { id: "gpt-5-codex", label: "gpt-5-codex (out: $10.00/1M)" },
-    { id: "gpt-5.2-pro", label: "gpt-5.2-pro (out: $168.00/1M)" },
-    { id: "gpt-5-pro", label: "gpt-5-pro (out: $120.00/1M)" },
-    { id: "gpt-4.1", label: "gpt-4.1 (out: $8.00/1M)" },
-    { id: "gpt-4.1-mini", label: "gpt-4.1-mini (out: $1.60/1M)" },
-    { id: "gpt-4.1-nano", label: "gpt-4.1-nano (out: $0.40/1M)" },
-    { id: "gpt-4o", label: "gpt-4o (out: $10.00/1M)" },
-    { id: "gpt-4o-2024-05-13", label: "gpt-4o-2024-05-13 (out: $15.00/1M)" },
-    { id: "gpt-4o-mini", label: "gpt-4o-mini (out: $0.60/1M)" }
+  const MODEL_CHOICES = [
+    { id: "gpt-5.2", label: "gpt-5.2 ($14.00/1M out)" },
+    { id: "gpt-5-mini", label: "gpt-5-mini ($2.00/1M out)" },
+    { id: "gpt-5-nano", label: "gpt-5-nano ($0.40/1M out)" },
   ];
-
-  const modelOptionsHtml = modelOptions
-    .map((m) => `<option value="${m.id}">${m.label}</option>`)
-    .join("");
 
   return `<!doctype html>
 <html lang=\"en\">
@@ -963,7 +948,9 @@ function renderHtml() {
         pointer-events: none;
         opacity: 0.08;
         background-image: url(\"data:image/svg+xml,%3Csvg%20xmlns%3D'http%3A//www.w3.org/2000/svg'%20width%3D'220'%20height%3D'220'%20viewBox%3D'0%200%20220%20220'%3E%3Crect%20width%3D'220'%20height%3D'220'%20fill%3D'none'/%3E%3Cg%20fill%3D'%230b3b7a'%3E%3Crect%20x%3D'18'%20y%3D'22'%20width%3D'10'%20height%3D'42'%20rx%3D'2'/%3E%3Crect%20x%3D'34'%20y%3D'34'%20width%3D'34'%20height%3D'10'%20rx%3D'2'/%3E%3Crect%20x%3D'74'%20y%3D'22'%20width%3D'10'%20height%3D'42'%20rx%3D'2'/%3E%3Crect%20x%3D'96'%20y%3D'56'%20width%3D'52'%20height%3D'10'%20rx%3D'2'/%3E%3Crect%20x%3D'148'%20y%3D'30'%20width%3D'10'%20height%3D'36'%20rx%3D'2'/%3E%3Crect%20x%3D'26'%20y%3D'96'%20width%3D'58'%20height%3D'10'%20rx%3D'2'/%3E%3Crect%20x%3D'26'%20y%3D'114'%20width%3D'10'%20height%3D'52'%20rx%3D'2'/%3E%3Crect%20x%3D'52'%20y%3D'138'%20width%3D'66'%20height%3D'10'%20rx%3D'2'/%3E%3Crect%20x%3D'134'%20y%3D'108'%20width%3D'10'%20height%3D'62'%20rx%3D'2'/%3E%3Crect%20x%3D'150'%20y%3D'122'%20width%3D'44'%20height%3D'10'%20rx%3D'2'/%3E%3Crect%20x%3D'166'%20y%3D'150'%20width%3D'28'%20height%3D'10'%20rx%3D'2'/%3E%3C/g%3E%3C/svg%3E\");
-        background-size: 220px 220px;
+        background-repeat: no-repeat;
+        background-position: 75% 18%;
+        background-size: 560px 560px;
       }
 
       /* Basic markdown styling inside chat bubbles */
@@ -1025,15 +1012,19 @@ function renderHtml() {
               <h2 class=\"h5\">Work</h2>
               <div class=\"row g-2 align-items-end mb-2\">
                 <div class=\"col-12 col-sm-6\">
-                  <label class=\"form-label small text-muted\" for=\"workModel\">Model</label>
-                  <select id=\"workModel\" class=\"form-select\">
-                    ${modelOptionsHtml}
-                  </select>
+                  <label class=\"form-label small text-muted\">Model</label>
+                  <div id=\"modelGroup\" class=\"btn-group w-100\" role=\"group\" aria-label=\"Model\">
+                    <input type=\"radio\" class=\"btn-check\" name=\"modelRadio\" id=\"m52\" autocomplete=\"off\" value=\"gpt-5.2\">
+                    <label class=\"btn btn-outline-primary\" for=\"m52\">gpt-5.2<br><span class=\"small\">$14.00/1M out</span></label>
+
+                    <input type=\"radio\" class=\"btn-check\" name=\"modelRadio\" id=\"m5mini\" autocomplete=\"off\" value=\"gpt-5-mini\">
+                    <label class=\"btn btn-outline-primary\" for=\"m5mini\">gpt-5-mini<br><span class=\"small\">$2.00/1M out</span></label>
+
+                    <input type=\"radio\" class=\"btn-check\" name=\"modelRadio\" id=\"m5nano\" autocomplete=\"off\" value=\"gpt-5-nano\">
+                    <label class=\"btn btn-outline-primary\" for=\"m5nano\">gpt-5-nano<br><span class=\"small\">$0.40/1M out</span></label>
+                  </div>
                 </div>
-                <div class=\"col-12 col-sm-6\">
-                  <label class=\"form-label small text-muted\" for=\"workModelCustom\">Custom</label>
-                  <input id=\"workModelCustom\" class=\"form-control\" placeholder=\"Optional model override\"/>
-                </div>
+                <div class=\"col-12 col-sm-6\"></div>
               </div>
               <div id=\"chatHistory\" class=\"border rounded bg-white p-2 mb-2\" style=\"height: 420px; overflow-y: auto;\"></div>
               <div class=\"mb-2\">
@@ -1154,7 +1145,8 @@ function renderHtml() {
 
       async function postJson(url, obj) {
         const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(obj) });
-        return await r.json();
+        const text = await r.text();
+        try { return JSON.parse(text); } catch { return { error: text || ('HTTP ' + r.status) }; }
       }
       async function getJson(url) {
         const r = await fetch(url);
@@ -1163,21 +1155,26 @@ function renderHtml() {
 
       const workBtn = document.getElementById('workBtn');
       const workPrompt = document.getElementById('workPrompt');
-      const workModel = document.getElementById('workModel');
-      const workModelCustom = document.getElementById('workModelCustom');
       const clearHistoryBtn = document.getElementById('clearHistoryBtn');
       const chatHistoryEl = document.getElementById('chatHistory');
       const workStatus = document.getElementById('workStatus');
       const usedMemoriesEl = document.getElementById('usedMemories');
       const autoCaptureStatusEl = document.getElementById('autoCaptureStatus');
 
-      // Persist model selection.
-      const savedModel = localStorage.getItem('enkidu.workModel') || '';
-      const savedCustom = localStorage.getItem('enkidu.workModelCustom') || '';
-      workModel.value = savedModel;
-      workModelCustom.value = savedCustom;
-      workModel.onchange = () => localStorage.setItem('enkidu.workModel', workModel.value || '');
-      workModelCustom.oninput = () => localStorage.setItem('enkidu.workModelCustom', workModelCustom.value || '');
+      // Persist model selection (radio buttons).
+      const MODEL_DEFAULT = 'gpt-5-mini';
+      function getSelectedModel() {
+        const el = document.querySelector('input[name=\"modelRadio\"]:checked');
+        return (el && el.value) ? el.value : MODEL_DEFAULT;
+      }
+      function setSelectedModel(id) {
+        const el = document.querySelector('input[name=\"modelRadio\"][value=\"' + id + '\"]');
+        if (el) el.checked = true;
+      }
+      setSelectedModel(localStorage.getItem('enkidu.model') || MODEL_DEFAULT);
+      document.querySelectorAll('input[name=\"modelRadio\"]').forEach(el => {
+        el.addEventListener('change', () => localStorage.setItem('enkidu.model', getSelectedModel()));
+      });
 
       // Chat history (browser-local).
       function loadHistory() {
@@ -1246,7 +1243,7 @@ function renderHtml() {
         workStatus.textContent = 'Working...';
         workBtn.disabled = true;
         addTypingIndicator();
-        const model = (workModelCustom.value || workModel.value || '').trim();
+        const model = getSelectedModel();
         const history = loadHistory();
         let resp = null;
         try {
@@ -1319,7 +1316,7 @@ function renderHtml() {
 
       dreamBtn.onclick = async () => {
         diaryOut.textContent = 'Dreaming...';
-        const resp = await postJson('/api/dream', {});
+        const resp = await postJson('/api/dream', { model: getSelectedModel() });
         diaryOut.textContent = resp.ok ? 'Dream complete. Refresh diary list.' : (resp.error || 'Error');
       };
 
@@ -1390,7 +1387,7 @@ async function main() {
     if (cmd === "index") return await cmdIndex();
     if (cmd === "capture") return await cmdCapture(args);
     if (cmd === "work") return await cmdWork(args);
-    if (cmd === "dream") return await cmdDream();
+    if (cmd === "dream") return await cmdDream(args);
     if (cmd === "serve") return await cmdServe(args);
 
     throw new Error(`Unknown command: ${cmd}`);
