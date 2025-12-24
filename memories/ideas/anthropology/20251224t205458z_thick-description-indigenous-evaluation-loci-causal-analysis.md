@@ -10,6 +10,7 @@ original_path: pasted/20251224t204302z_ideas_part52.md
 source_set: ideas
 
 source_set_context: things i am learning like social science etc
+spaced-rep-priority: 4
 ---
 
 - Geertz's "thick description": distinguish description of facts vs explanation of context, meaning, motivations (e.g., Balinese cockfight).

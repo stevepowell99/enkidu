@@ -158,11 +158,12 @@ Hardcoded system for testing yourself on memory notes:
 
 1. **High-importance memories** (`importance: 2-3`) are **automatically included** for testing (no manual tagging needed).
 2. **Optional**: manually tag other memories with `spaced-rep: 1-3` (1=low, 3=high relevance).
-3. **Type `m `** (m + space) in the Work chat to get a random weighted question with A-E options.
-4. **Select your answer** A-E using the inline buttons next to the question.
+3. **Type `m `** (m + space) OR **just ask for a quiz/test** — Enkidu will respond with a multiple-choice question.
+4. **Select your answer** A-E using the vertical buttons on the left side of the question.
 5. **Priority adjusts automatically**:
    - Correct answer → priority -1 (ask less often)
    - Wrong answer → priority +1 (ask more often)
+6. **Follow-up questions welcome** — after answering, you can ask for explanations or clarifications conversationally.
 
 Front matter example:
 ```yaml

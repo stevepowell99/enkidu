@@ -894,56 +894,64 @@
 
           currentSrQuestion = resp;
           
-          // Add question to history with inline A-E buttons.
+          // Add question to history with inline A-E buttons on the left side.
           const h = loadHistory();
           h.push({ role: 'assistant', content: '[Spaced Rep]\n\n' + resp.question });
           saveHistory(h.slice(-20));
           renderHistory();
           
-          // Create inline button row after the question.
+          // Create buttons vertically on the left side of the question.
           const lastMsg = chatHistoryEl.lastElementChild;
           if (lastMsg) {
-            const btnRow = document.createElement('div');
-            btnRow.className = 'd-flex gap-2 mt-2';
-            btnRow.id = 'srInlineButtons';
-            btnRow.innerHTML = `
-              <button class="btn btn-sm btn-outline-primary" data-sr-inline="A">A</button>
-              <button class="btn btn-sm btn-outline-primary" data-sr-inline="B">B</button>
-              <button class="btn btn-sm btn-outline-primary" data-sr-inline="C">C</button>
-              <button class="btn btn-sm btn-outline-primary" data-sr-inline="D">D</button>
-              <button class="btn btn-sm btn-outline-primary" data-sr-inline="E">E</button>
-              <button class="btn btn-sm btn-outline-secondary ms-auto" data-sr-inline="skip">Skip</button>
-            `;
-            lastMsg.querySelector('div').appendChild(btnRow);
-            
-            // Attach handlers.
-            btnRow.querySelectorAll('[data-sr-inline]').forEach(btn => {
-              btn.onclick = () => {
-                const ans = btn.getAttribute('data-sr-inline');
-                if (ans === 'skip') {
-                  btnRow.remove();
-                  currentSrQuestion = null;
-                  workStatus.textContent = 'Skipped.';
-                } else {
-                  submitSrAnswer(ans);
-                }
-              };
-            });
+            const bubble = lastMsg.querySelector('div');
+            if (bubble) {
+              // Wrap existing content and add buttons on the left.
+              const originalContent = bubble.innerHTML;
+              bubble.innerHTML = `
+                <div class="d-flex gap-2">
+                  <div class="d-flex flex-column gap-1" style="min-width: 50px;">
+                    <button class="btn btn-sm btn-outline-primary" data-sr-inline="A" style="width: 40px;">A</button>
+                    <button class="btn btn-sm btn-outline-primary" data-sr-inline="B" style="width: 40px;">B</button>
+                    <button class="btn btn-sm btn-outline-primary" data-sr-inline="C" style="width: 40px;">C</button>
+                    <button class="btn btn-sm btn-outline-primary" data-sr-inline="D" style="width: 40px;">D</button>
+                    <button class="btn btn-sm btn-outline-primary" data-sr-inline="E" style="width: 40px;">E</button>
+                    <button class="btn btn-sm btn-outline-secondary mt-2" data-sr-inline="skip" style="width: 40px; font-size: 0.7rem;">Skip</button>
+                  </div>
+                  <div class="flex-grow-1">${originalContent}</div>
+                </div>
+              `;
+              
+              // Attach handlers.
+              bubble.querySelectorAll('[data-sr-inline]').forEach(btn => {
+                btn.onclick = () => {
+                  const ans = btn.getAttribute('data-sr-inline');
+                  if (ans === 'skip') {
+                    // Remove buttons but keep question visible.
+                    bubble.innerHTML = originalContent;
+                    currentSrQuestion = null;
+                    workStatus.textContent = 'Skipped.';
+                  } else {
+                    submitSrAnswer(ans, originalContent, bubble);
+                  }
+                };
+              });
+            }
           }
           
-          workStatus.textContent = 'Select your answer (A-E)';
+          workStatus.textContent = 'Select your answer (A-E) or ask for clarification';
         } finally {
           workBtn.disabled = false;
           workBtnNow.disabled = false;
         }
       }
 
-      async function submitSrAnswer(userAnswer) {
+      async function submitSrAnswer(userAnswer, originalContent, bubble) {
         if (!currentSrQuestion) return;
         
-        // Remove inline buttons.
-        const btnRow = document.getElementById('srInlineButtons');
-        if (btnRow) btnRow.remove();
+        // Replace buttons with just the question content.
+        if (bubble && originalContent) {
+          bubble.innerHTML = originalContent;
+        }
         
         workBtn.disabled = true;
         workBtnNow.disabled = true;
@@ -973,14 +981,15 @@
             ? `${result}. Priority: ${resp.oldPriority || 0} → ${resp.newPriority}.`
             : `${result}.`;
           
-          workStatus.textContent = feedback;
+          workStatus.textContent = feedback + ' (You can ask follow-up questions about this)';
           const h = loadHistory();
           h.push({ role: 'user', content: `[SR Answer: ${userAnswer}]` });
           h.push({ role: 'assistant', content: feedback });
           saveHistory(h.slice(-20));
           renderHistory();
           
-          currentSrQuestion = null;
+          // Keep currentSrQuestion available for follow-up questions.
+          // It will be cleared when next "m " command is run.
         } finally {
           workBtn.disabled = false;
           workBtnNow.disabled = false;

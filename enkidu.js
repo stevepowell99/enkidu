@@ -2195,6 +2195,7 @@ async function dreamExecuteFromPlan(plan) {
   await ensureDirs();
   const instruction = String(plan?.instruction || "");
   const model = String(plan?.model || "").trim();
+  const customDir = String(plan?.customInstruction || "").trim();
   const catalog = Array.isArray(plan?.catalog) ? plan.catalog : [];
   const duplicate_report = plan?.duplicate_report || null;
   const wantRead = Array.isArray(plan?.wantRead) ? plan.wantRead : [];
@@ -2231,6 +2232,7 @@ async function dreamExecuteFromPlan(plan) {
       role: "user",
       content:
         "You are running DREAM (step 2/2).\n\n" +
+        (customDir ? `User directive: ${customDir}\n\n` : "") +
         "You have a catalog of all notes (metadata+previews) and full contents for selected_files.\n" +
         "Return ONLY valid JSON matching output_contract.\n\n" +
         JSON.stringify(step2, null, 2),
