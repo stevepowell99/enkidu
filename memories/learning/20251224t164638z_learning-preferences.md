@@ -1,17 +1,19 @@
 ---
 title: "Learning preferences (language quizzes & study topics)"
-id: d5fdb419a6bddc883e540478
-created: 2025-12-24T16:46:38Z
-tags: [learning, learning-preferences, languages, bosnian, english]
+id: 29c5f57c73f6d4bb4c30d9d1
+created: "2025-12-24T16:46:38Z"
+tags:
+  - learning-preferences
+  - languages
+  - Bosnian
+  - English
 importance: 2
-source_refs:
-  - memories/learning/bosnian/20251224t161948z_request-5-question-bosnian-grammar-mcq-pade-i.md
-  - memories/learning/bosnian/20251224t164302z_study-topic-choice-participles.md
-  - memories/learning/english/20251224t144433z_user-preference-english-grammar-quiz-for-bosnian-speaker.md
 ---
 
-Stable preferences captured from recent inbox items:
-- User frequently requests short language quizzes (Bosnian and English).
-- User chooses study topics for Bosnian (recent selection: participles).
+Stable user learning preferences (canonicalised):
 
-Usage note: store and reuse these preferences when generating short quizzes or study plans (memories/learning). Keep entries concise and update when the user makes new, explicit choices. See the linked English preference note for details about tailoring quizzes to a Bosnian speaker.
+- Prefers short, focused language quizzes (e.g. 5-question MCQ) for Bosnian and English practice.
+- Chooses concrete study topics (recent: participles / verb forms) and requests adjustable difficulty.
+- Prefers explanations and quiz items tailored for Bosnian speakers when learning English.
+
+Usage note: treat this as a reusable preference record for generating future quizzes and study prompts. Do not duplicate; update this note if preferences change.

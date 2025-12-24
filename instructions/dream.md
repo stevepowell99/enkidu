@@ -16,6 +16,7 @@ Goal: improve the organisation and quality of the memories folder over time.
 - Delete redundant notes.
 - Rewrite note content to be clearer and more concise.
 - Add/clean front matter (title/created/tags/source/importance).
+- **Create new folders** by writing a small `.gitkeep` or `README.md` file into the new path (you can't create empty folders directly).
 
 ## Inbox triage (default priority)
 If `memories/inbox/` is non-empty, this is your most basic task:
