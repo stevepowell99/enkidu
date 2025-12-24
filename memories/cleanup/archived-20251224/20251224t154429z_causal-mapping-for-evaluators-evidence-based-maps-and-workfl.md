@@ -1,5 +1,6 @@
 ---
 title: Causal mapping for evaluators — evidence-based maps and workflow
+id: d101e002737919784ebdcaa0
 created: 2025-12-24T15:44:29Z
 tags: causal-mapping, evaluation, evidence, qualitative-methods, transparency
 importance: 2

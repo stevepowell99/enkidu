@@ -1,5 +1,6 @@
 ---
 title: Generate hierarchical table of contents
+id: 97e0d2d7601bab5eab16539b
 created: 2025-12-24T14:50:46Z
 tags: copilot,prompts,toc,documentation
 importance: 1

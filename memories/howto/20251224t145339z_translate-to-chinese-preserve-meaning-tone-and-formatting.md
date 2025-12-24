@@ -1,5 +1,6 @@
 ---
 title: Translate to Chinese: preserve meaning, tone, and formatting
+id: cd7e60dabbc8e8c48f305b29
 created: 2025-12-24T14:53:39Z
 tags: copilot,prompts,translation,chinese
 importance: 2

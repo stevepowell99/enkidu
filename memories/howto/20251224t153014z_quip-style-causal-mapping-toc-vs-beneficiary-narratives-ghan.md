@@ -1,5 +1,6 @@
 ---
 title: QuIP-style causal mapping: ToC vs beneficiary narratives (Ghana)
+id: 2fc3a13e2ba5c1a9fbdf5d44
 created: 2025-12-24T15:30:14Z
 tags: causal-mapping, QuIP, program-theory, ToC, narratives, evidence
 importance: 2

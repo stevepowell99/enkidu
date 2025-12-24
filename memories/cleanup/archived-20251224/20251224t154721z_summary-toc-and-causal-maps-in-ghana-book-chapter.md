@@ -1,5 +1,6 @@
 ---
 title: Summary: ToC and causal maps in Ghana (book chapter)
+id: 8d9f0eaa2ac39562afc0d53b
 created: 2025-12-24T15:47:21Z
 tags: causal-mapping, quip, toc, theory-comparison, evidence, mapping
 importance: 2

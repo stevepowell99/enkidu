@@ -1,5 +1,6 @@
 ---
 title: Qualitative causal mapping in health evaluations — Summary
+id: 777ddcb615de2d914114d618
 created: 2025-12-24T15:46:39Z
 tags: causal-mapping, qualitative, evaluation, health, QuIP
 importance: 2

@@ -46,3 +46,5 @@ Rules:
 ## Organisation preference (small update)
 - Consolidate methodological and project-level drafts into canonical notes under memories/howto or memories/projects. Use `source_ref` / `source_refs` fields to point to original verbatim sources in memories/sources/verbatim and preserve provenance.
 - When inbox drafts are redundant or older versions of canonicalised material, move them to memories/cleanup for archival rather than leaving them in the inbox. This reduces clutter while preserving sources for future verification.
+
+Small update: User frequently requests short language quizzes (Bosnian and English) and chooses study topics; treat these as stable preferences and store them under memories/learning for reuse.

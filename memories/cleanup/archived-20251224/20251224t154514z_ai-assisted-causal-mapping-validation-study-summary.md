@@ -1,5 +1,6 @@
 ---
 title: AI-assisted causal mapping — validation study (summary)
+id: ea5bff5f0651a9c4ae0b1a3d
 created: 2025-12-24T15:45:14Z
 tags: causal-mapping, ai, evaluation
 importance: 1

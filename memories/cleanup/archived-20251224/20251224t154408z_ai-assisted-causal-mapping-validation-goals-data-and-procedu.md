@@ -1,5 +1,6 @@
 ---
 title: AI-assisted causal mapping validation: goals, data and procedure
+id: bc84563d8ea60685b07b0f1a
 created: 2025-12-24T15:44:08Z
 tags: causal-mapping, AI, evaluation, QA
 importance: 2

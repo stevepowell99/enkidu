@@ -1,5 +1,6 @@
 ---
 title: Change Inside and Out: An Evaluator’s Guide to Outcome Harvesting + Attitude Change
+id: f8a0d67842ee9b4910b253b5
 created: 2025-12-24T14:48:10Z
 tags: OH+AC,outcome-harvesting,evaluation,attitude-change,guide
 importance: 2

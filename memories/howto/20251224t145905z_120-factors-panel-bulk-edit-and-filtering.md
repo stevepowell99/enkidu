@@ -1,5 +1,6 @@
 ---
 title: 120 Factors Panel: Bulk Edit and Filtering
+id: 98cefc41f4d7a90a9f4dbef1
 created: 2025-12-24T14:59:05Z
 tags: factors-panel, bulk-edit, search-replace, filtering, demographics, UI
 importance: 1

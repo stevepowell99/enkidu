@@ -1,5 +1,6 @@
 ---
 title: Causal mapping for evaluators (summary)
+id: 25ec4548a3be7ba010d15f1f
 created: 2025-12-24T15:45:43Z
 tags: causal_mapping, evaluation, qualitative_data_analysis, provenance, QDA, epistemic-objects
 importance: 2

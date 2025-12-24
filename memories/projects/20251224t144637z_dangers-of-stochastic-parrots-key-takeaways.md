@@ -1,5 +1,6 @@
 ---
 title: Dangers of Stochastic Parrots: Key Takeaways
+id: d0c065a37c0ea30c0cc7234e
 created: 2025-12-24T14:46:37Z
 tags: NLP,bias,ethics,environmental-cost,datasets,language-models
 importance: 2

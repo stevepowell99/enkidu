@@ -1,5 +1,6 @@
 ---
 title: Causal mapping for evaluators (pre-publication overview)
+id: 8f69a41a2e4acf901f1df7d1
 created: 2025-12-24T15:24:00Z
 tags: causal-mapping, evaluation, qualitative-methods, provenance, evidence, software-guidelines
 importance: 1

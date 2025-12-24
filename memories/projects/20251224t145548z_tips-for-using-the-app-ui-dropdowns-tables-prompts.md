@@ -1,5 +1,6 @@
 ---
 title: Tips for using the app UI (dropdowns, tables, prompts)
+id: d2225cd247d751a30c326bca
 created: 2025-12-24T14:55:48Z
 tags: ui,dropdowns,tables,prompts,ai-history
 importance: 1

@@ -1,5 +1,6 @@
 ---
 title: Causal mapping for evaluators
+id: 3d2b5ea31c91795c95a74ade
 created: 2025-12-24T15:18:46Z
 tags: causal-mapping,evaluation,methodology,guidelines
 importance: 2

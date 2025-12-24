@@ -1,5 +1,6 @@
 ---
 title: Grammar and spelling fixer prompt
+id: 62bef7a758994e9c9e1ee988
 created: 2025-12-24T14:50:05Z
 tags: prompting,editing,copilot,grammar
 importance: 2

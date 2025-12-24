@@ -1,5 +1,6 @@
 ---
 title: Defining quality and rigor in Causal Pathways evaluation
+id: e4eaf139237466c5236decf4
 created: 2025-12-24T14:46:18Z
 tags: causal-pathways,evaluation,quality,rigor,methodology
 importance: 2

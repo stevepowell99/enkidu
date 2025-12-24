@@ -1,5 +1,6 @@
 ---
 title: KLAR Outcome Harvesting AI Pilot — Summary (Draft Chapter)
+id: 4582b83eef7ac1e65c4a5872
 created: 2025-12-24T15:46:09Z
 tags: AI, Outcome Harvesting, KLAR, evaluation, governance, risks
 importance: 2

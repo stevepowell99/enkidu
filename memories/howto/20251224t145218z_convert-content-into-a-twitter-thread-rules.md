@@ -1,5 +1,6 @@
 ---
 title: Convert content into a Twitter thread (rules)
+id: ae3798267db3f4a73ac40430
 created: 2025-12-24T14:52:18Z
 tags: twitter,thread,prompting,copywriting
 importance: 2

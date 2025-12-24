@@ -1,5 +1,6 @@
 ---
 title: Sources Panel: upload, split, and sectioning
+id: 23b58bb0f0d4e30e6d1d47bf
 created: 2025-12-24T14:58:14Z
 tags: causal-map,sources-panel,upload,split,regex,sections,metadata,custom-columns
 importance: 2

@@ -1,5 +1,6 @@
 ---
 title: Left and right panels in Causal Map App layout
+id: 557058463de6c0af30bd6c64
 created: 2025-12-24T14:55:16Z
 tags: UI,layout,two-pane,causal-map
 importance: 1

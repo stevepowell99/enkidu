@@ -1,5 +1,6 @@
 ---
 title: Causal Map App: Sources selection and groups
+id: d72f9b5ebd84c8209d9f91ff
 created: 2025-12-24T14:56:44Z
 tags: sources,ui,filters,links-pipeline,grouping
 importance: 1

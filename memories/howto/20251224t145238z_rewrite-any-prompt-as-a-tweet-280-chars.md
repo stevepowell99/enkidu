@@ -1,5 +1,6 @@
 ---
 title: Rewrite any prompt as a tweet (≤280 chars)
+id: 5798a86881fbffa897c3b9be
 created: 2025-12-24T14:52:38Z
 tags: prompt-engineering,twitter,copywriting
 importance: 2

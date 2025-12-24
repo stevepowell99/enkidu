@@ -1,5 +1,6 @@
 ---
 title: AI-assisted causal mapping for scalable program evaluation
+id: 45507c59f5a9b8fa5caf908d
 created: 2025-12-24T15:19:11Z
 tags: AI,evaluation,causal-mapping,qualitative-data,program-theory
 importance: 2

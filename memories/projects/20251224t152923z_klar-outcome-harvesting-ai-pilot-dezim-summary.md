@@ -1,5 +1,6 @@
 ---
 title: KLAR Outcome Harvesting AI pilot (DEZIM) – summary
+id: e3fdedce79df98d8d55eb4e8
 created: 2025-12-24T15:29:23Z
 tags: outcome-harvesting, AI, causal-mapping, KLAR, evaluation, scaling
 importance: 2

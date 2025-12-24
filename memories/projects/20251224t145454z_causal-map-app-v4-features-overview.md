@@ -1,5 +1,6 @@
 ---
 title: Causal Map App v4 features overview
+id: 8c938c070c6ec503dbc311ba
 created: 2025-12-24T14:54:54Z
 tags: causal-map,cm4,features,product
 importance: 1

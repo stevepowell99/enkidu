@@ -1,5 +1,6 @@
 ---
 title: AI-assisted causal mapping workflow for stories at scale
+id: 41bf4c9b8e9862a07ba0255b
 created: 2025-12-24T15:11:42Z
 tags: causal-mapping, ai, qualitative-coding, workflow, stories
 importance: 2

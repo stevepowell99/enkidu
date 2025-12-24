@@ -1,5 +1,6 @@
 ---
 title: Getting Started with CausalMap
+id: df2d38771dfb9601cebe5e7d
 created: 2025-12-24T14:54:01Z
 tags: causal-mapping,guide,getting-started,app
 importance: 2

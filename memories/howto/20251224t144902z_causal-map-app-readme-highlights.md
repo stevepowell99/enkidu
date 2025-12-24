@@ -1,5 +1,6 @@
 ---
 title: Causal Map App README highlights
+id: 3e9d5fdd265f8ec77e98b536
 created: 2025-12-24T14:49:02Z
 tags: causal-map,help-system,anchors,internal-links,mermaid
 importance: 2

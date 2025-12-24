@@ -1,5 +1,6 @@
 ---
 title: Harvest Assistant: AI interviewer in Outcome Harvesting for democratic evaluation
+id: df001978c44293adceb736b7
 created: 2025-12-24T15:42:20Z
 tags: AI, evaluation, Outcome Harvesting, democracy, participatory evaluation, KLAR!, climate adaptation, causal mapping
 importance: 2

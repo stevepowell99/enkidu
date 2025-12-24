@@ -1,5 +1,6 @@
 ---
 title: Map Panel: controls, legend, formatting, and vignettes
+id: 655a80ac7d11c7e5a13a0c88
 created: 2025-12-24T14:58:39Z
 tags: map-panel,causal-map,visualization,interactive-features,vignettes,grid-layout,map-legend
 importance: 2

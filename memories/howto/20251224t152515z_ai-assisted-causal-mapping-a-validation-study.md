@@ -1,5 +1,6 @@
 ---
 title: AI-assisted causal mapping: a validation study
+id: 0d0334167dcac4d7ddb0f607
 created: 2025-12-24T15:25:15Z
 tags: causal-mapping, ai, llm, qualitative-coding, methodology
 importance: 2

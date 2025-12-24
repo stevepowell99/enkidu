@@ -1,5 +1,6 @@
 ---
 title: Future stories — values, narratives, and change
+id: e64e4a0e158fcb65d395e40f
 created: 2025-12-24T14:48:29Z
 tags: narratives,values,education,futures,moral-development,storytelling
 importance: 2

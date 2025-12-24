@@ -1,5 +1,6 @@
 ---
 title: Epic of Gilgamesh as long poem
+id: 3d001b32a96208b01b2c0620
 created: 2025-12-24T12:58:36Z
 tags: mythology, literature
 importance: 1

@@ -1,5 +1,6 @@
 ---
 title: Glossary generation prompt
+id: 6acb7966e467479116fb201c
 created: 2025-12-24T14:50:25Z
 tags: copilot,prompts,glossary,reference
 importance: 2

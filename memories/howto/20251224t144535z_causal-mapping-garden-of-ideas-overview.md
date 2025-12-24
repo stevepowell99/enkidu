@@ -1,5 +1,6 @@
 ---
 title: Causal Mapping: Garden of Ideas overview
+id: 2bf2d8a121bd92a322d54d25
 created: 2025-12-24T14:45:35Z
 tags: causal-mapping, theory, app, garden, background
 importance: 2

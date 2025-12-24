@@ -1,5 +1,6 @@
 ---
 title: AI-assisted causal mapping: validation and workflow
+id: 26dd73188eee543ad2e7e910
 created: 2025-12-24T15:28:15Z
 tags: causal-mapping, AI, NLP, qualitative-data, provenance, evaluation
 importance: 2

@@ -42,6 +42,7 @@ const DEFAULT_PORT = 3000;
 const DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small";
 const IMPORTANCE_WEIGHT_EMBED = 0.1; // adds up to +0.3 for importance=3
 const IMPORTANCE_WEIGHT_KEYWORD = 2; // adds up to +6 for importance=3
+const NOTE_ID_BYTES = 12; // 24 hex chars
 
 const MEMORY_FOLDERS = [
   path.join(MEMORIES_DIR, "inbox"),
@@ -243,6 +244,10 @@ function sha256Hex(s) {
   return crypto.createHash("sha256").update(String(s || ""), "utf8").digest("hex");
 }
 
+function generateNoteId() {
+  return crypto.randomBytes(NOTE_ID_BYTES).toString("hex");
+}
+
 function approxTokensForText(s) {
   // Very rough but conservative-enough heuristic: ~4 bytes/token in English-ish text.
   // Purpose: keep embedding requests within model input limits without extra deps.
@@ -339,7 +344,18 @@ function isCuratableMemoryPath(rel) {
 }
 
 function buildDuplicateReport({ entries, embeddingsCache }) {
-  const cacheItems = embeddingsCache?.items || {};
+  const itemsById = embeddingsCache?.itemsById || {};
+  const idByPath = embeddingsCache?.idByPath || {};
+  const legacyByPath = embeddingsCache?.items || {};
+
+  function getEmbedItemForPath(rel) {
+    const p = String(rel || "").replaceAll("\\", "/");
+    const id = String(idByPath?.[p] || "").trim();
+    if (id && itemsById?.[id]) return itemsById[id];
+    if (legacyByPath?.[p]) return legacyByPath[p];
+    return null;
+  }
+
   const threshold = Math.max(0.90, Math.min(0.999, Number(process.env.ENKIDU_DEDUPE_SIM_THRESHOLD || 0.985)));
   const maxPairs = Math.max(10, Math.min(200, Number(process.env.ENKIDU_DEDUPE_MAX_PAIRS || 60)));
   const maxComparisons = Math.max(500, Math.min(50000, Number(process.env.ENKIDU_DEDUPE_MAX_COMPARISONS || 12000)));
@@ -355,7 +371,7 @@ function buildDuplicateReport({ entries, embeddingsCache }) {
   const byHash = new Map(); // hash -> [path]
   for (const rel of entryByPath.keys()) {
     if (!isCuratableMemoryPath(rel)) continue;
-    const h = cacheItems?.[rel]?.hash;
+    const h = getEmbedItemForPath(rel)?.hash;
     if (!h) continue;
     if (!byHash.has(h)) byHash.set(h, []);
     byHash.get(h).push(rel);
@@ -388,8 +404,8 @@ function buildDuplicateReport({ entries, embeddingsCache }) {
         if (comparisons++ > maxComparisons) break;
         const a = ps[i];
         const b = ps[j];
-        const va = cacheItems?.[a]?.vector;
-        const vb = cacheItems?.[b]?.vector;
+        const va = getEmbedItemForPath(a)?.vector;
+        const vb = getEmbedItemForPath(b)?.vector;
         if (!Array.isArray(va) || !Array.isArray(vb)) continue;
         const score = cosineSim(va, vb);
         if (score < threshold) continue;
@@ -495,6 +511,14 @@ function safeRelPath(absPath) {
   return path.relative(REPO_ROOT, absPath).split(path.sep).join("/");
 }
 
+function pathKind(relPath) {
+  const p = String(relPath || "").replaceAll("\\", "/").toLowerCase();
+  if (p.startsWith("memories/sources/verbatim/")) return "source_verbatim";
+  if (p.startsWith("memories/diary/")) return "diary";
+  if (p.startsWith("memories/")) return "memory";
+  return "other";
+}
+
 function assertWithinMemories(absPath) {
   const resolved = path.resolve(absPath);
   const root = path.resolve(MEMORIES_DIR);
@@ -549,6 +573,63 @@ function parseFrontMatter(text) {
   return out;
 }
 
+function upsertFrontMatterField(md, key, value) {
+  const k = String(key || "").trim();
+  const v = String(value || "").trim();
+  if (!k) return md;
+  const lines = String(md || "").split(/\r?\n/);
+  if (!lines.length) return md;
+
+  // Add new front matter if missing.
+  if (lines[0].trim() !== "---") {
+    return ["---", `${k}: ${v}`, "---", "", ...lines].join("\n");
+  }
+
+  // Find end of front matter.
+  let end = -1;
+  for (let i = 1; i < Math.min(lines.length, 400); i++) {
+    if (lines[i].trim() === "---") {
+      end = i;
+      break;
+    }
+  }
+  if (end === -1) {
+    // Malformed: prepend a minimal block.
+    return ["---", `${k}: ${v}`, "---", "", ...lines].join("\n");
+  }
+
+  // Replace if present.
+  const esc = k.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&");
+  const re = new RegExp(`^\\s*${esc}\\s*:\\s*.*$`, "i");
+  const out = [...lines];
+  for (let i = 1; i < end; i++) {
+    if (re.test(out[i])) {
+      out[i] = `${k}: ${v}`;
+      return out.join("\n");
+    }
+  }
+
+  // Insert near top, after title if present.
+  let insertAt = 1;
+  for (let i = 1; i < end; i++) {
+    if (/^\s*title\s*:/i.test(out[i])) {
+      insertAt = i + 1;
+      break;
+    }
+  }
+  out.splice(insertAt, 0, `${k}: ${v}`);
+  return out.join("\n");
+}
+
+function ensureNoteIdInMarkdown(md) {
+  const fm = parseFrontMatter(md);
+  const existing = String(fm.id || "").trim();
+  if (existing) return { id: existing, md, changed: false };
+  const id = generateNoteId();
+  const updated = upsertFrontMatterField(md, "id", id);
+  return { id, md: updated, changed: true };
+}
+
 function stripFrontMatter(text) {
   const s = String(text || "");
   if (!s.startsWith("---")) return s;
@@ -589,6 +670,7 @@ async function buildIndex() {
     const updated = new Date(st.mtimeMs).toISOString().replace(/\.\d{3}Z$/, "Z");
     const title = fm.title || path.basename(p, ".md");
     const created = fm.created || updated;
+    const id = String(fm.id || "").trim();
 
     const tagsRaw = fm.tags || "";
     const tags = tagsRaw
@@ -606,8 +688,12 @@ async function buildIndex() {
     }
     const preview = body.replace(/\s+/g, " ").trim().slice(0, 240);
 
+    const rel = safeRelPath(p).replaceAll("\\", "/");
+    const kind = pathKind(rel);
     entries.push({
-      path: safeRelPath(p),
+      id,
+      path: rel,
+      kind,
       title,
       tags,
       importance,
@@ -816,8 +902,8 @@ async function ensureEmbeddingsCache() {
   // Create an embeddings cache lazily so auto-embed can work immediately after the first capture.
   const model = process.env.OPENAI_EMBEDDING_MODEL || DEFAULT_EMBEDDING_MODEL;
   const existing = await loadEmbeddingsCache();
-  if (existing && existing.items) return existing;
-  const fresh = { model, generated_at: nowIso(), items: {} };
+  if (existing && (existing.itemsById || existing.items)) return existing;
+  const fresh = { model, generated_at: nowIso(), itemsById: {}, idByPath: {} };
   await writeEmbeddingsCache(fresh);
   return fresh;
 }
@@ -826,25 +912,45 @@ async function updateEmbeddingForMemoryPath(relPath) {
   // Incrementally embed a single memories/*.md file.
   // Uses hash of body (front-matter stripped) so we only re-embed when content changes.
   const rel = String(relPath || "");
-  if (!rel.toLowerCase().startsWith("memories/") || !rel.toLowerCase().endsWith(".md")) return;
+  const kind = pathKind(rel);
+  if (kind !== "memory") return;
+  if (!rel.toLowerCase().endsWith(".md")) return;
 
   const abs = path.join(REPO_ROOT, rel);
   assertWithinMemories(abs);
   if (!fs.existsSync(abs)) return;
 
-  const md = await readFileUtf8(abs);
+  let md = await readFileUtf8(abs);
+  const idRes = ensureNoteIdInMarkdown(md);
+  if (idRes.changed) {
+    md = idRes.md;
+    await writeFileUtf8(abs, md);
+  }
+  const id = idRes.id;
   const body = stripFrontMatter(md).trim();
   const h = sha256Hex(body);
 
   const cache = await ensureEmbeddingsCache();
-  cache.items = cache.items || {};
-  const prev = cache.items[rel];
-  if (prev && prev.hash === h && Array.isArray(prev.vector)) return;
+  cache.itemsById = cache.itemsById || {};
+  cache.idByPath = cache.idByPath || {};
+  if (cache.itemsById && Object.keys(cache.itemsById).length) delete cache.items;
+
+  // Prefer new format keyed by id; fall back to legacy path-keyed cache if present.
+  const prev = cache.itemsById[id] || (cache.items && cache.items[rel]) || null;
+  if (prev && prev.hash === h && Array.isArray(prev.vector)) {
+    cache.itemsById[id] = { hash: prev.hash, vector: prev.vector, path: rel };
+    cache.idByPath[rel] = id;
+    cache.generated_at = nowIso();
+    await writeEmbeddingsCache(cache);
+    return;
+  }
 
   const embedText = trimForEmbedding(body);
   const vec = await openaiEmbed(embedText, { model: cache.model || DEFAULT_EMBEDDING_MODEL });
-  cache.items[rel] = { hash: h, vector: vec };
+  cache.itemsById[id] = { hash: h, vector: vec, path: rel };
+  cache.idByPath[rel] = id;
   cache.generated_at = nowIso();
+  if (cache.itemsById && Object.keys(cache.itemsById).length) delete cache.items;
   await writeEmbeddingsCache(cache);
 }
 
@@ -855,52 +961,63 @@ async function cmdEmbed(args = {}) {
   const idx = await loadIndex();
   const entries = idx.entries || [];
 
-  const cache = (await loadEmbeddingsCache()) || { model, generated_at: nowIso(), items: {} };
+  const loaded = (await loadEmbeddingsCache()) || { model, generated_at: nowIso(), itemsById: {}, idByPath: {} };
+  const cache = loaded;
   cache.model = model;
   cache.generated_at = nowIso();
-  cache.items = cache.items || {};
+  cache.itemsById = cache.itemsById || {};
+  cache.idByPath = cache.idByPath || {};
+  // Keep legacy cache if present (for one-time migration), but prefer writing itemsById going forward.
+  cache.items = cache.items || cache.itemsById || {};
 
-  // Normalise cache keys so moves/OS path separators don't break lookups.
-  // - Convert absolute paths under repo into repo-relative paths.
-  // - Convert backslashes to forward slashes.
-  for (const k of Object.keys(cache.items)) {
-    let nk = String(k || "");
-    if (path.isAbsolute(nk)) nk = safeRelPath(nk);
-    nk = nk.replaceAll("\\", "/").replace(/^\.\/+/, "");
-    if (nk !== k) {
-      cache.items[nk] = cache.items[k];
-      delete cache.items[k];
-    }
-  }
-
-  const currentPaths = new Set(entries.map((e) => String(e.path || "").replaceAll("\\", "/")));
+  const currentIds = new Set(entries.map((e) => String(e.id || "").trim()).filter(Boolean));
 
   let updated = 0;
   for (const e of entries) {
     const rel = String(e.path || "");
+    if (pathKind(rel) !== "memory") continue;
     const abs = path.join(REPO_ROOT, rel);
     assertWithinMemories(abs);
     if (!fs.existsSync(abs)) continue;
 
-    const md = await readFileUtf8(abs);
+    let md = await readFileUtf8(abs);
+    const idRes = ensureNoteIdInMarkdown(md);
+    if (idRes.changed) {
+      md = idRes.md;
+      await writeFileUtf8(abs, md);
+    }
+    const id = String(idRes.id || "").trim();
+    if (!id) continue;
     const body = stripFrontMatter(md).trim();
     const h = sha256Hex(body);
 
-    const prev = cache.items[rel];
-    if (prev && prev.hash === h && Array.isArray(prev.vector)) continue;
+    const prev = cache.itemsById[id] || (cache.items && cache.items[rel]) || null;
+    if (prev && prev.hash === h && Array.isArray(prev.vector)) {
+      cache.itemsById[id] = { hash: prev.hash, vector: prev.vector, path: rel };
+      cache.idByPath[rel] = id;
+      continue;
+    }
 
     // Keep embedding input bounded by token budget.
     const embedText = trimForEmbedding(body);
     const vec = await openaiEmbed(embedText, { model });
-    cache.items[rel] = { hash: h, vector: vec };
+    cache.itemsById[id] = { hash: h, vector: vec, path: rel };
+    cache.idByPath[rel] = id;
     updated += 1;
   }
 
-  // Prune embeddings for files that no longer exist in the index (e.g. after dream moves/renames/deletes).
-  for (const k of Object.keys(cache.items)) {
-    if (!currentPaths.has(String(k || ""))) delete cache.items[k];
+  // Prune embeddings for ids that no longer exist in the index (e.g. after deletes).
+  for (const k of Object.keys(cache.itemsById)) {
+    if (!currentIds.has(String(k || ""))) delete cache.itemsById[k];
+  }
+  // Prune idByPath for paths that no longer exist.
+  for (const p of Object.keys(cache.idByPath)) {
+    const abs = path.join(REPO_ROOT, p);
+    if (!fs.existsSync(abs)) delete cache.idByPath[p];
   }
 
+  // Drop legacy path-keyed cache once we've built itemsById.
+  if (cache.itemsById && Object.keys(cache.itemsById).length) delete cache.items;
   await writeEmbeddingsCache(cache);
   console.log(`Embeddings updated: ${updated} file(s). Cache: ${safeRelPath(EMBEDDINGS_FILE)}`);
 }
@@ -911,7 +1028,7 @@ async function retrieveTopMemoriesByEmbeddings(queries, topN) {
   const idx = await loadIndex();
   const entries = idx.entries || [];
   const cache = await loadEmbeddingsCache();
-  if (!cache || !cache.items) return null;
+  if (!cache || (!cache.itemsById && !cache.items)) return null;
 
   const qs = (Array.isArray(queries) ? queries : [String(queries || "")]).map((s) => String(s || "").trim()).filter(Boolean);
   if (!qs.length) return [];
@@ -922,9 +1039,11 @@ async function retrieveTopMemoriesByEmbeddings(queries, topN) {
   const scored = [];
   for (const e of entries) {
     const rel = String(e.path || "");
+    if (pathKind(rel) !== "memory") continue;
     const abs = path.join(REPO_ROOT, rel);
     if (!fs.existsSync(abs)) continue;
-    const item = cache.items[rel];
+    const id = String(e.id || "").trim();
+    const item = (id && cache.itemsById && cache.itemsById[id]) || (cache.items && cache.items[rel]) || null;
     if (!item || !Array.isArray(item.vector)) continue;
     let best = -1;
     for (const qv of qVecs) best = Math.max(best, cosineSim(qv, item.vector));
@@ -997,7 +1116,7 @@ async function retrieveTopMemories(prompt, topN) {
 
   // If embeddings exist, use cosine similarity ranking.
   const cache = await loadEmbeddingsCache();
-  if (cache && cache.items) {
+  if (cache && (cache.itemsById || cache.items)) {
     const out = await retrieveTopMemoriesByEmbeddings([String(prompt || "")], topN);
     if (out) return out;
   }
@@ -1007,6 +1126,7 @@ async function retrieveTopMemories(prompt, topN) {
   const scored = [];
 
   for (const e of entries) {
+    if (String(e.kind || "") !== "memory") continue;
     const p = path.join(REPO_ROOT, e.path);
     if (!fs.existsSync(p)) continue;
     const text = await readFileUtf8(p);
@@ -1077,6 +1197,12 @@ function intersectionSize(aSet, bSet) {
   let c = 0;
   for (const x of aSet) if (bSet.has(x)) c++;
   return c;
+}
+
+function isPreferenceTagged(tags) {
+  const ts = Array.isArray(tags) ? tags : [];
+  const lower = ts.map((t) => String(t || "").toLowerCase().trim());
+  return lower.includes("preference") || lower.includes("preferences") || lower.includes("style") || lower.includes("habits");
 }
 
 function extractWebFetchUrl(text) {
@@ -1151,11 +1277,13 @@ async function writeAutoCaptureToInbox(capture) {
   }
 
   const created = nowIso();
+  const id = generateNoteId();
   const fname = `${filenameTimestamp()}_${slugify(title).slice(0, 60)}.md`.toLowerCase();
   const rel = `memories/inbox/${fname}`;
 
   const md = [
     "---",
+    `id: ${id}`,
     `title: ${title}`,
     `created: ${created}`,
     `tags: ${tags.join(", ")}`,
@@ -1256,6 +1384,9 @@ async function workPlanCore({ prompt, model, history, runNow }) {
   const route = fast ? { needRecency: false, needExpansion: false } : heuristicRoute(prompt);
   const memTopN = Math.max(0, Math.min(50, Number(process.env.ENKIDU_WORK_MEM_TOP || 5)));
   const srcTopN = Math.max(0, Math.min(20, Number(process.env.ENKIDU_WORK_SRC_TOP || 3)));
+  const prefCapWanted = Math.max(0, Math.min(3, Math.ceil(memTopN * 0.05)));
+  const prefCap = memTopN > 0 ? Math.min(prefCapWanted, Math.max(0, memTopN - 1)) : 0; // keep fact-first
+  const factCap = Math.max(0, memTopN - prefCap);
 
   // Recency (episodic memory): always available across sessions.
   const recentEvents = route.needRecency ? await loadRecentSessionEvents(30) : [];
@@ -1268,11 +1399,49 @@ async function workPlanCore({ prompt, model, history, runNow }) {
   // Semantic retrieval: embeddings if available, otherwise keyword fallback inside retrieveTopMemories().
   let top = [];
   if (!fast) {
-    const topEmb = await retrieveTopMemoriesByEmbeddings(queries, memTopN);
-    top = topEmb && topEmb.length ? topEmb : await retrieveTopMemories(prompt, memTopN);
+    // Fetch extra candidates so we can keep facts first while reserving a tiny preference slice.
+    const candidateN = Math.max(memTopN, factCap + prefCap + 8);
+    const topEmb = await retrieveTopMemoriesByEmbeddings(queries, candidateN);
+    top = topEmb && topEmb.length ? topEmb : await retrieveTopMemories(prompt, candidateN);
   }
 
-  const memChunks = top.map(({ entry, text }) => {
+  // Preferences slice: tiny, mostly-stable guidance (style/habits).
+  // We pick globally important preference-tagged notes, not query-dependent.
+  let prefPicked = [];
+  if (!fast && prefCap > 0) {
+    const idx = await loadIndex();
+    const prefEntries = (idx.entries || [])
+      .filter((e) => String(e.kind || "") === "memory" && isPreferenceTagged(e.tags))
+      .sort((a, b) => {
+        const ia = Number.isFinite(Number(a.importance)) ? Number(a.importance) : 0;
+        const ib = Number.isFinite(Number(b.importance)) ? Number(b.importance) : 0;
+        if (ia !== ib) return ib - ia;
+        return String(b.updated || "").localeCompare(String(a.updated || ""));
+      })
+      .slice(0, prefCap);
+
+    for (const e of prefEntries) {
+      const abs = path.join(REPO_ROOT, String(e.path || ""));
+      if (!fs.existsSync(abs)) continue;
+      const text = await readFileUtf8(abs);
+      prefPicked.push({ entry: e, text });
+    }
+  }
+
+  const prefPaths = new Set(prefPicked.map((x) => String(x.entry?.path || "")));
+  const factPicked = top.filter((x) => !prefPaths.has(String(x.entry?.path || ""))).slice(0, factCap);
+
+  const prefChunks = prefPicked.map(({ entry, text }) => {
+    return [
+      `[Preference] ${entry.title || ""}`,
+      `Path: ${entry.path || ""}`,
+      `Tags: ${(entry.tags || []).join(", ")}`,
+      "---",
+      String(text || "").trim(),
+    ].join("\n");
+  });
+
+  const factChunks = factPicked.map(({ entry, text }) => {
     return [
       `[Memory] ${entry.title || ""}`,
       `Path: ${entry.path || ""}`,
@@ -1286,7 +1455,8 @@ async function workPlanCore({ prompt, model, history, runNow }) {
   if (recentEvents.length) {
     userParts.push("Recent conversation (episodic memory):\n\n" + formatRecentSessionForPrompt(recentEvents));
   }
-  if (memChunks.length) userParts.push("Relevant memories (may be incomplete):\n\n" + memChunks.join("\n\n"));
+  if (prefChunks.length) userParts.push("Stable preferences (small slice; style/habits):\n\n" + prefChunks.join("\n\n"));
+  if (factChunks.length) userParts.push("Relevant memories (may be incomplete):\n\n" + factChunks.join("\n\n"));
 
   // Read-only sources (server-side verbatim store + embeddings).
   const storedSources = fast ? [] : await retrieveTopSourcesByEmbeddings(queries, srcTopN);
@@ -1304,11 +1474,13 @@ async function workPlanCore({ prompt, model, history, runNow }) {
 
   userParts.push("User prompt:\n\n" + prompt);
 
-  const usedMemories = top.map(({ entry }) => ({
+  const usedMemories = [...prefPicked, ...factPicked].map(({ entry }) => ({
+    id: entry.id || "",
     title: entry.title || "",
     path: entry.path || "",
     tags: entry.tags || [],
     importance: Number.isFinite(Number(entry.importance)) ? Number(entry.importance) : 0,
+    kind: entry.kind || "",
   }));
   const usedSources = storedSources.map((s) => ({ path: s.path || "" }));
 
@@ -1517,6 +1689,37 @@ async function cmdIndex() {
   console.log(`Indexed ${entries.length} memory file(s) into ${safeRelPath(INDEX_FILE)}`);
 }
 
+async function cmdMigrateIds(args = {}) {
+  if (isSupabaseMode()) throw new Error("migrate-ids is local-only (file-based memories)");
+  await ensureDirs();
+  const includeDiary = String(args.diary || "").toLowerCase() === "true";
+  const files = await iterMemoryMarkdownFiles();
+  let updated = 0;
+  let skipped = 0;
+
+  for (const abs of files) {
+    const rel = safeRelPath(abs).replaceAll("\\", "/");
+    const kind = pathKind(rel);
+    if (kind === "source_verbatim") {
+      skipped += 1;
+      continue;
+    }
+    if (!includeDiary && kind === "diary") {
+      skipped += 1;
+      continue;
+    }
+    const md = await readFileUtf8(abs);
+    const res = ensureNoteIdInMarkdown(md);
+    if (!res.changed) continue;
+    await writeFileUtf8(abs, res.md);
+    updated += 1;
+  }
+
+  const entries = await buildIndex();
+  await writeIndex(entries);
+  console.log(`IDs migrated. Updated: ${updated}, skipped: ${skipped}. Index rebuilt: ${safeRelPath(INDEX_FILE)}`);
+}
+
 function parseArgv(argv) {
   // Very small argv parser: subcommand + --key value + positionals.
   const out = { _: [] };
@@ -1546,11 +1749,13 @@ async function cmdCapture(args) {
   if (!text) throw new Error("--text is required");
 
   const created = nowIso();
+  const id = generateNoteId();
   const fname = `${filenameTimestamp()}_${slugify(title).slice(0, 60)}.md`.toLowerCase();
   const rel = `memories/inbox/${fname}`;
 
   const md = [
     "---",
+    `id: ${id}`,
     `title: ${title}`,
     `created: ${created}`,
     `tags: ${tags.join(", ")}`,
@@ -2200,10 +2405,15 @@ async function applyDreamOps(ops) {
 
     if (kind === "write") {
       const p = String(op?.path || "");
-      const content = String(op?.content || "");
+      let content = String(op?.content || "");
       const abs = path.join(REPO_ROOT, p);
       assertWithinWritableRoots(abs);
       assertNotProtectedWritable(abs);
+      // Ensure memories/*.md notes always have stable ids (so embeddings survive moves/renames).
+      if (pathKind(p) === "memory" && String(p || "").toLowerCase().endsWith(".md") && !String(p || "").toLowerCase().startsWith("memories/sources/verbatim/")) {
+        const res = ensureNoteIdInMarkdown(content);
+        content = res.md;
+      }
       await writeFileUtf8(abs, content);
       applied.push({ op: "write", path: p, bytes: Buffer.byteLength(content, "utf8") });
       continue;
@@ -2384,6 +2594,7 @@ async function ingestSourcesBatch(files, model, meta = {}) {
     const why = String(parsed.why || "").trim();
 
     const created = nowIso();
+    const id = generateNoteId();
     const fname = `${filenameTimestamp()}_${slugify(title).slice(0, 60)}.md`.toLowerCase();
     const memRel = `memories/${dest}/${fname}`;
     const memAbs = path.join(REPO_ROOT, memRel);
@@ -2391,6 +2602,7 @@ async function ingestSourcesBatch(files, model, meta = {}) {
 
     const mem = [
       "---",
+      `id: ${id}`,
       `title: ${title}`,
       `created: ${created}`,
       `tags: ${tags}`,
@@ -2491,11 +2703,13 @@ async function ingestSourcesBatchSupabase(files, model, meta = {}) {
     const why = String(parsed.why || "").trim();
 
     const created = nowIso();
+    const id = generateNoteId();
     const fname = `${filenameTimestamp()}_${slugify(title).slice(0, 60)}.md`.toLowerCase();
     const memRel = `memories/${dest}/${fname}`;
 
     const mem = [
       "---",
+      `id: ${id}`,
       `title: ${title}`,
       `created: ${created}`,
       `tags: ${tags}`,
@@ -2982,6 +3196,7 @@ async function main() {
     if (cmd === "init") return await cmdInit();
     if (cmd === "index") return await cmdIndex();
     if (cmd === "embed") return await cmdEmbed(args);
+    if (cmd === "migrate-ids") return await cmdMigrateIds(args);
     if (cmd === "capture") return await cmdCapture(args);
     if (cmd === "work") return await cmdWork(args);
     if (cmd === "dream") return await cmdDream(args);
@@ -3001,6 +3216,7 @@ Commands:
   node enkidu.js init
   node enkidu.js index
   node enkidu.js embed
+  node enkidu.js migrate-ids
   node enkidu.js capture --title \"...\" --tags \"a,b\" --text \"...\"
   node enkidu.js work \"your prompt\"
   node enkidu.js dream

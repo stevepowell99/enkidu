@@ -1,5 +1,6 @@
 ---
 title: AI-powered workflow for collecting and understanding stories at scale
+id: fc8a9effc157c96b83a6b393
 created: 2025-12-24T15:40:10Z
 tags: causal-mapping, evaluation, AI-interviewing, qualitative-data-analysis, program-theory
 importance: 2

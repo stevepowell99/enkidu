@@ -1,5 +1,6 @@
 ---
 title: How CausalMap Works
+id: daff447afd672781dd8c7fa6
 created: 2025-12-24T14:54:19Z
 tags: causalmap,workflow,ai,collaboration,analysis
 importance: 2

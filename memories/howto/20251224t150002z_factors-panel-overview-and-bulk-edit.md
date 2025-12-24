@@ -1,5 +1,6 @@
 ---
 title: Factors Panel Overview and Bulk Edit
+id: 2771d267a46f0ea96de0b9f6
 created: 2025-12-24T15:00:02Z
 tags: causal-map, factors-panel, bulk-edit, search-replace, demographics, UI
 importance: 2

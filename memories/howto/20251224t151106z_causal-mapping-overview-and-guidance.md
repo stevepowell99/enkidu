@@ -1,5 +1,6 @@
 ---
 title: Causal mapping — overview and guidance
+id: abd6b8b9f44f54f26987c461
 created: 2025-12-24T15:11:06Z
 tags: causal-mapping, evaluation-method, qualitative-analysis, mental-models
 importance: 2

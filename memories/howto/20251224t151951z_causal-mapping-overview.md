@@ -1,5 +1,6 @@
 ---
 title: Causal mapping overview
+id: 8959bb4b40f69d086ff3ac1c
 created: 2025-12-24T15:19:51Z
 tags: causal-mapping,evaluation,qualitative-methods
 importance: 2

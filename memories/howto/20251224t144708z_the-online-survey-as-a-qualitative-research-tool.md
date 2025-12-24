@@ -1,5 +1,6 @@
 ---
 title: The online survey as a qualitative research tool
+id: dcecb10270f09e35165e8f1d
 created: 2025-12-24T14:47:08Z
 tags: qualitative-research, online-surveys, methodology, design
 importance: 2

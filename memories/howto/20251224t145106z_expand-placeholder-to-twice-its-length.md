@@ -1,5 +1,6 @@
 ---
 title: Expand placeholder to twice its length
+id: 94e05c9931105901b8b9e916
 created: 2025-12-24T14:51:06Z
 tags: copilot, prompts, expansion, writing, technique
 importance: 2

@@ -1,5 +1,6 @@
 ---
 title: Causal mapping for evaluators (pre-publication 2023)
+id: 36eeb29e0193fe09135c68b4
 created: 2025-12-24T15:10:06Z
 tags: causal-mapping,evaluation,history,software
 importance: 2

@@ -1,5 +1,6 @@
 ---
 title: Remove URLs from text
+id: 34d035ea17e90364999b84da
 created: 2025-12-24T14:51:43Z
 tags: text-processing,url-removal,sanitization,copilot
 importance: 2

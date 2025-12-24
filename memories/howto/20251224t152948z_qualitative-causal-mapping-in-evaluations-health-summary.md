@@ -1,5 +1,6 @@
 ---
 title: Qualitative causal mapping in evaluations (health) — summary
+id: 2003c9a1c6ad8ea9497a9ec6
 created: 2025-12-24T15:29:48Z
 tags: causal-mapping, evaluations, health, qualitative-methods, summarization
 importance: 1

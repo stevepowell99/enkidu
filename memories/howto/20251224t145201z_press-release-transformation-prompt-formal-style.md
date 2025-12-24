@@ -1,5 +1,6 @@
 ---
 title: Press release transformation prompt (formal style)
+id: 86ecaf7af7da8c94c1275a1b
 created: 2025-12-24T14:52:01Z
 tags: prompting, press release, journalism, inverted pyramid, dateline, headline
 importance: 2

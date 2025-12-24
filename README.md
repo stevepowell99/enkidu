@@ -21,17 +21,22 @@ Put these in `.env` (or real env vars). See `env.example`.
 - `OPENAI_BASE_URL` (optional, default `https://api.openai.com/v1`)
 - `OPENAI_MODEL` (optional, default `gpt-4o-mini`)
 - `OPENAI_EMBEDDING_MODEL` (optional, default `text-embedding-3-small`)
+- `ENKIDU_OPENAI_RETRIES` (optional, default `4`)
+- `ENKIDU_EMBED_MAX_TOKENS` (optional, embedding input budget, default `7800`)
+- `ENKIDU_WORK_MEM_TOP` (optional, max memories included in Work, default `5`)
+- `ENKIDU_WORK_SRC_TOP` (optional, max sources included in Work, default `3`)
 - `ENKIDU_STORAGE` (`local` default; `supabase` to use Supabase SQL)
 - `SUPABASE_URL` (required if `ENKIDU_STORAGE=supabase`)
 - `SUPABASE_SERVICE_ROLE_KEY` (required if `ENKIDU_STORAGE=supabase`; keep server-side only)
 
 ## Commands
 - `node enkidu.js serve --port 3000` (UI)
-- `npm run serve:watch` (UI dev restart; watches `enkidu.js` + `instructions/*.md`)
+- `npm run serve:watch` (UI dev restart; watches `enkidu.js` by default; set `ENKIDU_WATCH_INSTRUCTIONS=true` to also restart on `instructions/*.md`)
 - `node enkidu.js work "..."` (CLI work)
 - `node enkidu.js capture --title "..." --tags "a,b" --text "..."` (manual memory note)
 - `node enkidu.js dream --model gpt-5-mini` (autonomous memory re-org + diary; model optional)
 - `node enkidu.js embed` (rebuild/update memory embeddings cache; normally automatic)
+- `node enkidu.js migrate-ids` (one-time migration: add stable `id:` to memory notes; excludes verbatim sources)
 
 ## Hosting (Netlify + Supabase) (git-push deploy)
 
@@ -59,7 +64,7 @@ Put these in `.env` (or real env vars). See `env.example`.
 ### Memory store (writable)
 - **Local mode (`ENKIDU_STORAGE=local`)**:
   - `memories/inbox|people|projects|howto/*.md`: curated memory notes
-  - front matter supports: `title`, `created`, `tags`, `importance: 0..3`, `source`, etc
+  - front matter supports: `id` (stable), `title`, `created`, `tags`, `importance: 0..3`, `source`, etc
   - `memories/sessions/recent.jsonl`: rolling session log (episodic memory)
   - `memories/diary/*.md`: dream diary entries
 - **Supabase mode (`ENKIDU_STORAGE=supabase`)**:
@@ -69,8 +74,8 @@ Put these in `.env` (or real env vars). See `env.example`.
 
 ### Generated caches (gitignored)
 - (Local mode only)
-  - `memories/_index.json`: index of memory notes (paths + metadata + preview + importance)
-  - `memories/_embeddings.json`: embeddings cache for memory notes (hash + vector per note)
+  - `memories/_index.json`: index of memory notes (id + path + metadata + preview + importance)
+  - `memories/_embeddings.json`: embeddings cache for memory notes (keyed by `id`, stores hash + vector + last known path)
   - `memories/_source_embeddings.json`: embeddings cache for stored verbatim sources
 
 ### Instructions (soft architecture)
@@ -89,6 +94,25 @@ Put these in `.env` (or real env vars). See `env.example`.
    - default excerpt size: 4k chars
    - if prompt asks for “verbatim / quote / full text”: include up to 20k chars
 5. **Answer call** → response + `===CAPTURE=== ...` (auto-capture writes to inbox and updates embeddings)
+
+### Work context composition (fact-first + small preferences slice)
+- Work includes **mostly factual/project context** plus a tiny **preferences slice** (style/habits), selected by tags (`style`, `preference`, `habits`) and capped to a small fraction of the memory budget.
+
+## Dataflow (local mode)
+
+```mermaid
+flowchart TD
+Notes[NotesMdFiles] --> Index[IndexJson_ById]
+Notes --> Embed[Embeddings_ById]
+Work[WorkPrompt] --> Retrieve[RetrieveFactsPlusPrefs]
+Retrieve --> Embed
+Retrieve --> Index
+Retrieve --> Context[PromptContext]
+Context --> LLM[LLMAnswer]
+Dream[Dream] --> Notes
+Dream --> Index
+Dream --> Embed
+```
 
 UI shows:
 - “Used memories” (and their importance)

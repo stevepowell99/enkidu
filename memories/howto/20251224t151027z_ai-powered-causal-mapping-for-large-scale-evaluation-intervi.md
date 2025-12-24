@@ -1,5 +1,6 @@
 ---
 title: AI-powered causal mapping for large-scale evaluation interviews
+id: 987e288f22fbf3ea0b048623
 created: 2025-12-24T15:10:27Z
 tags: AI,causal mapping,evaluation,qualitative,program theory,CA
 importance: 2

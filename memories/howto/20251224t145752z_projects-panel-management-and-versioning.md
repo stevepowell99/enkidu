@@ -1,5 +1,6 @@
 ---
 title: Projects Panel: management and versioning
+id: 530c88323ec1f8d880ab3c4a
 created: 2025-12-24T14:57:52Z
 tags: projects, panel, management, sharing, versioning, ui
 importance: 2

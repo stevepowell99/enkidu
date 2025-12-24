@@ -1,5 +1,6 @@
 ---
 title: Stig: Publications on Causal Mapping — Summaries
+id: 2ba50b1431c60aa7b56cba4d
 created: 2025-12-24T15:41:41Z
 tags: causal-mapping, publications, summaries
 importance: 1

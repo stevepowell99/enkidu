@@ -1,5 +1,6 @@
 ---
 title: Create Links tab – causal link coding
+id: f8253fba4aaafdd375daaac2
 created: 2025-12-24T14:57:04Z
 tags: causal-mapping,links,coding,user-guide,factors
 importance: 1

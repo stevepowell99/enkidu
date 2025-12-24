@@ -1,5 +1,6 @@
 ---
 title: Zotero template.md overview
+id: e9a6f6b30a9aaeee90dc40a9
 created: 2025-12-24T14:45:58Z
 tags: zotero,templates,markdown,bibliography
 importance: 2

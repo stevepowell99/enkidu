@@ -1,5 +1,6 @@
 ---
 title: AI-powered causal mapping workflow for scalable interviews
+id: 06e318e6c02d4010d205e36e
 created: 2025-12-24T15:24:20Z
 tags: causal-mapping, ai-interview, qualitative-data-analysis, program-theory, evaluation
 importance: 1

@@ -1,5 +1,6 @@
 ---
 title: Simplify text to 6th-grade level
+id: ebe846a6c72ec22709ea9452
 created: 2025-12-24T14:52:55Z
 tags: writing, accessibility, prompt, simplification
 importance: 2

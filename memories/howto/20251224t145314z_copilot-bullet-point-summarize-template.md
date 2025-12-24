@@ -1,5 +1,6 @@
 ---
 title: Copilot: bullet-point summarize template
+id: 17d98acd3f25640445faaee1
 created: 2025-12-24T14:53:14Z
 tags: copilot,prompting,summarize,markdown
 importance: 2

@@ -1,5 +1,6 @@
 ---
 title: Does our theory match your theory? Theories of change and causal maps in Ghana
+id: d98b7cad703c189b1695add3
 created: 2025-12-24T15:43:07Z
 tags: causal-mapping, theory-of-change, QuIP, evaluation, Ghana, publications
 importance: 1

@@ -1,5 +1,6 @@
 ---
 title: Project navigation and management (UI guide)
+id: 0bddadc596bead20ef778930
 created: 2025-12-24T14:56:21Z
 tags: ui,project,navigation,permissions,ai-processing
 importance: 2

@@ -1,5 +1,6 @@
 ---
 title: Strengthening Outcome Harvesting with AI-assisted causal mapping
+id: e515a84a4d412fb951a7e91b
 created: 2025-12-24T14:47:26Z
 tags: AI,outcome-harvesting,causal-mapping,research-methods,case-study,zotero
 importance: 2

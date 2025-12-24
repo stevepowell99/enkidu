@@ -1,5 +1,6 @@
 ---
 title: Causal Mapping Publications — Summaries
+id: 4e6a0ff03cd421ffbd00b698
 created: 2025-12-24T15:25:38Z
 tags: causal-mapping, publications, summaries
 importance: 2

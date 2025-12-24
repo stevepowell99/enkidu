@@ -1,5 +1,6 @@
 ---
 title: Recent work snapshot
+id: ead8379a2dde5bb62dc23beb
 created: 2025-12-24T15:47:42Z
 tags: work, academic, causal-mapping, outcome-harvesting, QuIP, AI
 importance: 1

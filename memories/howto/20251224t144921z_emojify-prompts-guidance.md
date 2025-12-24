@@ -1,5 +1,6 @@
 ---
 title: Emojify prompts guidance
+id: 0aa5c7ee56e5ab6614eeac1f
 created: 2025-12-24T14:49:21Z
 tags: copilot,emojis,prompting,writing
 importance: 2

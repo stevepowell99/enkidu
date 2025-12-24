@@ -1,5 +1,6 @@
 ---
 title: Causal mapping overview
+id: 33cfd5ff90284aae9a6419f5
 created: 2025-12-24T15:24:54Z
 tags: causal-mapping, qualitative-data, mental-models, evaluation, visualisation
 importance: 2

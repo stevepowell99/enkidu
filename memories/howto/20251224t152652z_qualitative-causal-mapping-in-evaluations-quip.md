@@ -1,5 +1,6 @@
 ---
 title: Qualitative causal mapping in evaluations (QuIP)
+id: fb8930ca52811891ebdefc29
 created: 2025-12-24T15:26:52Z
 tags: causal mapping, QuIP, qualitative evaluation, health, realist evaluation
 importance: 2

@@ -1,5 +1,6 @@
 ---
 title: Condense text to half length while preserving core ideas and tone
+id: 14ef3cf7a504afb06a3629cf
 created: 2025-12-24T14:51:26Z
 tags: copilot,prompts,summarization,shortening
 importance: 2

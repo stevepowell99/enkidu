@@ -1,5 +1,6 @@
 ---
 title: Causal mapping for evaluators — summary
+id: f7fcbeaacf1de26e01f78a0c
 created: 2025-12-24T15:29:04Z
 tags: causal-mapping, evaluation, evidence, provenance, methods
 importance: 2

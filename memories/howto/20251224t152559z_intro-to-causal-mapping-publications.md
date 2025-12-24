@@ -1,5 +1,6 @@
 ---
 title: Intro to causal mapping publications
+id: 6d287fa8fbbe06c42ab4013b
 created: 2025-12-24T15:25:59Z
 tags: causal-mapping, summaries, publications
 importance: 2

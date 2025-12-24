@@ -1,5 +1,6 @@
 ---
 title: Qualitative Impact Protocol (QuIP) in health evaluations
+id: 131582d1019cb8a1a950419b
 created: 2025-12-24T15:42:42Z
 tags: causal mapping, QuIP, health, evaluation
 importance: 2

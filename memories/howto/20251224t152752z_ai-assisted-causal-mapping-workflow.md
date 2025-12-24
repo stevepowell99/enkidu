@@ -1,5 +1,6 @@
 ---
 title: AI-assisted causal mapping workflow
+id: 4bc875b0011ed4cc631d0898
 created: 2025-12-24T15:27:52Z
 tags: causal-mapping, AI, evaluation, workflow, methodology, canonical
 importance: 2
