@@ -1,0 +1,13 @@
+﻿# Local env
+.env
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Generated
+memories/_index.json
+
+# Editor/workspace
