@@ -243,6 +243,39 @@ function sha256Hex(s) {
   return crypto.createHash("sha256").update(String(s || ""), "utf8").digest("hex");
 }
 
+function approxTokensForText(s) {
+  // Very rough but conservative-enough heuristic: ~4 bytes/token in English-ish text.
+  // Purpose: keep embedding requests within model input limits without extra deps.
+  const bytes = Buffer.byteLength(String(s || ""), "utf8");
+  return Math.ceil(bytes / 4);
+}
+
+function trimToApproxTokens(s, maxTokens) {
+  const maxT = Math.max(256, Number(maxTokens) || 0);
+  let out = String(s || "");
+  if (!out) return out;
+  if (approxTokensForText(out) <= maxT) return out;
+
+  // First cut by byte ratio (fast).
+  const maxBytes = maxT * 4;
+  const bytes = Buffer.byteLength(out, "utf8");
+  const ratio = maxBytes / Math.max(1, bytes);
+  out = out.slice(0, Math.max(1, Math.floor(out.length * ratio)));
+
+  // Tighten with a few passes.
+  for (let i = 0; i < 8 && out && approxTokensForText(out) > maxT; i++) {
+    out = out.slice(0, Math.max(1, Math.floor(out.length * 0.92)));
+  }
+  return out;
+}
+
+function trimForEmbedding(text) {
+  // Keep a safety margin under the common ~8192 token embedding limit.
+  // Configurable for experimentation.
+  const maxTokens = Number(process.env.ENKIDU_EMBED_MAX_TOKENS || 7800);
+  return trimToApproxTokens(String(text || ""), maxTokens);
+}
+
 function dot(a, b) {
   let s = 0;
   const n = Math.min(a.length, b.length);
@@ -577,7 +610,7 @@ async function updateEmbeddingForSourcePath(relPath) {
   const prev = cache.items[rel];
   if (prev && prev.hash === h && Array.isArray(prev.vector)) return;
 
-  const embedText = body.slice(0, 12000);
+  const embedText = trimForEmbedding(body);
   const vec = await openaiEmbed(embedText, { model: cache.model || DEFAULT_EMBEDDING_MODEL });
   cache.items[rel] = { hash: h, vector: vec };
   cache.generated_at = nowIso();
@@ -666,7 +699,7 @@ async function updateEmbeddingForMemoryPath(relPath) {
   const prev = cache.items[rel];
   if (prev && prev.hash === h && Array.isArray(prev.vector)) return;
 
-  const embedText = body.slice(0, 12000);
+  const embedText = trimForEmbedding(body);
   const vec = await openaiEmbed(embedText, { model: cache.model || DEFAULT_EMBEDDING_MODEL });
   cache.items[rel] = { hash: h, vector: vec };
   cache.generated_at = nowIso();
@@ -714,8 +747,8 @@ async function cmdEmbed(args = {}) {
     const prev = cache.items[rel];
     if (prev && prev.hash === h && Array.isArray(prev.vector)) continue;
 
-    // Keep embedding input bounded; we can revisit chunking later if needed.
-    const embedText = body.slice(0, 12000);
+    // Keep embedding input bounded by token budget.
+    const embedText = trimForEmbedding(body);
     const vec = await openaiEmbed(embedText, { model });
     cache.items[rel] = { hash: h, vector: vec };
     updated += 1;

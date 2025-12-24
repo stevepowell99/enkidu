@@ -312,7 +312,7 @@
 
         ingestSourcesBtn.disabled = true;
         clearSourcesBtn.disabled = true;
-        sourcesStatusEl.textContent = 'Ingesting...';
+        sourcesStatusEl.textContent = 'Ingesting... (preparing files)';
 
         const model = getSelectedModel();
         let done = 0;
@@ -325,9 +325,11 @@
             const batch = files.slice(i, i + batchSize);
             const payloadFiles = [];
             for (const f of batch) {
+              sourcesStatusEl.textContent = 'Ingesting... reading ' + (done + payloadFiles.length + 1) + '/' + files.length;
               const rel = f.webkitRelativePath || f.name;
               payloadFiles.push({ path: rel, content: await f.text() });
             }
+            sourcesStatusEl.textContent = 'Ingesting... uploading batch ' + (Math.floor(i / batchSize) + 1) + '/' + Math.ceil(files.length / batchSize);
             const resp = await postJson('/api/sources/ingest', { model, files: payloadFiles });
             if (resp && resp.error) {
               sourcesStatusEl.textContent = 'Error: ' + resp.error;
@@ -336,9 +338,11 @@
             createdMem += (resp.createdMemories || []).length;
             createdSrc += (resp.createdSources || []).length;
             done += batch.length;
-            sourcesStatusEl.textContent = 'Ingested ' + done + '/' + files.length + ' files. Created ' + createdMem + ' memory notes.';
+            sourcesStatusEl.textContent =
+              'Ingesting... processed ' + done + '/' + files.length +
+              ' files. Created ' + createdMem + ' memory notes; stored ' + createdSrc + ' sources.';
           }
-          sourcesStatusEl.textContent = 'Done. Created ' + createdMem + ' memory notes from ' + createdSrc + ' source file(s).';
+          sourcesStatusEl.textContent = 'Done. Created ' + createdMem + ' memory notes; stored ' + createdSrc + ' source file(s).';
         } finally {
           ingestSourcesBtn.disabled = false;
           clearSourcesBtn.disabled = false;
