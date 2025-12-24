@@ -11,6 +11,7 @@
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import { spawn } from "node:child_process";
+import crypto from "node:crypto";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,6 +23,7 @@ const __dirname = path.dirname(__filename);
 const REPO_ROOT = __dirname;
 const MEMORIES_DIR = path.join(REPO_ROOT, "memories");
 const INDEX_FILE = path.join(MEMORIES_DIR, "_index.json");
+const EMBEDDINGS_FILE = path.join(MEMORIES_DIR, "_embeddings.json");
 const INSTRUCTIONS_DIR = path.join(REPO_ROOT, "instructions");
 const WORK_INSTRUCTION_FILE = path.join(INSTRUCTIONS_DIR, "work.md");
 const DREAM_INSTRUCTION_FILE = path.join(INSTRUCTIONS_DIR, "dream.md");
@@ -30,6 +32,7 @@ const DOTENV_FILE = path.join(REPO_ROOT, ".env");
 const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
 const DEFAULT_OPENAI_MODEL = "gpt-4o-mini";
 const DEFAULT_PORT = 3000;
+const DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small";
 
 const MEMORY_FOLDERS = [
   path.join(MEMORIES_DIR, "inbox"),
@@ -64,6 +67,25 @@ function slugify(s) {
 function tokenize(s) {
   const m = String(s || "").toLowerCase().match(/[a-z0-9]{2,}/g);
   return new Set(m || []);
+}
+
+function sha256Hex(s) {
+  return crypto.createHash("sha256").update(String(s || ""), "utf8").digest("hex");
+}
+
+function dot(a, b) {
+  let s = 0;
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) s += a[i] * b[i];
+  return s;
+}
+
+function l2norm(a) {
+  return Math.sqrt(dot(a, a)) || 1;
+}
+
+function cosineSim(a, b) {
+  return dot(a, b) / (l2norm(a) * l2norm(b));
 }
 
 async function ensureDirs() {
@@ -233,9 +255,113 @@ async function loadIndex() {
   return JSON.parse(await readFileUtf8(INDEX_FILE));
 }
 
+async function openaiEmbed(text, opts = {}) {
+  loadDotenvIfPresent();
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) throw new Error("Missing OPENAI_API_KEY");
+
+  const baseUrl = (process.env.OPENAI_BASE_URL || DEFAULT_OPENAI_BASE_URL).replace(/\/+$/, "");
+  const model = String(opts.model || "").trim() || process.env.OPENAI_EMBEDDING_MODEL || DEFAULT_EMBEDDING_MODEL;
+
+  const url = `${baseUrl}/embeddings`;
+  const payload = { model, input: String(text || "") };
+
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  const raw = await resp.text();
+  if (!resp.ok) throw new Error(`OpenAI HTTP ${resp.status}: ${raw}`);
+
+  const data = JSON.parse(raw);
+  const vec = data?.data?.[0]?.embedding;
+  if (!Array.isArray(vec)) throw new Error(`Unexpected embeddings response: ${raw}`);
+  return vec;
+}
+
+async function loadEmbeddingsCache() {
+  if (!fs.existsSync(EMBEDDINGS_FILE)) return null;
+  try {
+    return JSON.parse(await readFileUtf8(EMBEDDINGS_FILE));
+  } catch {
+    return null;
+  }
+}
+
+async function writeEmbeddingsCache(cache) {
+  await ensureDirs();
+  await writeFileUtf8(EMBEDDINGS_FILE, JSON.stringify(cache, null, 2) + "\n");
+}
+
+async function cmdEmbed(args = {}) {
+  await ensureDirs();
+  const model = String(args.model || "").trim() || process.env.OPENAI_EMBEDDING_MODEL || DEFAULT_EMBEDDING_MODEL;
+
+  const idx = await loadIndex();
+  const entries = idx.entries || [];
+
+  const cache = (await loadEmbeddingsCache()) || { model, generated_at: nowIso(), items: {} };
+  cache.model = model;
+  cache.generated_at = nowIso();
+  cache.items = cache.items || {};
+
+  let updated = 0;
+  for (const e of entries) {
+    const rel = String(e.path || "");
+    const abs = path.join(REPO_ROOT, rel);
+    assertWithinMemories(abs);
+    if (!fs.existsSync(abs)) continue;
+
+    const md = await readFileUtf8(abs);
+    const body = stripFrontMatter(md).trim();
+    const h = sha256Hex(body);
+
+    const prev = cache.items[rel];
+    if (prev && prev.hash === h && Array.isArray(prev.vector)) continue;
+
+    // Keep embedding input bounded; we can revisit chunking later if needed.
+    const embedText = body.slice(0, 12000);
+    const vec = await openaiEmbed(embedText, { model });
+    cache.items[rel] = { hash: h, vector: vec };
+    updated += 1;
+  }
+
+  await writeEmbeddingsCache(cache);
+  console.log(`Embeddings updated: ${updated} file(s). Cache: ${safeRelPath(EMBEDDINGS_FILE)}`);
+}
+
 async function retrieveTopMemories(prompt, topN) {
   const idx = await loadIndex();
   const entries = idx.entries || [];
+
+  // If embeddings exist, use cosine similarity ranking.
+  const cache = await loadEmbeddingsCache();
+  if (cache && cache.items) {
+    const qVec = await openaiEmbed(String(prompt || ""), { model: cache.model || DEFAULT_EMBEDDING_MODEL });
+    const scored = [];
+    for (const e of entries) {
+      const rel = String(e.path || "");
+      const abs = path.join(REPO_ROOT, rel);
+      if (!fs.existsSync(abs)) continue;
+      const item = cache.items[rel];
+      if (!item || !Array.isArray(item.vector)) continue;
+      const sim = cosineSim(qVec, item.vector);
+      scored.push([sim, e]);
+    }
+    scored.sort((a, b) => b[0] - a[0]);
+    const picked = scored.slice(0, topN).map((x) => x[1]);
+    const out = [];
+    for (const e of picked) {
+      const p = path.join(REPO_ROOT, e.path);
+      const text = await readFileUtf8(p);
+      out.push({ entry: e, text });
+    }
+    return out;
+  }
+
+  // Fallback: keyword overlap scoring.
   const promptTokens = tokenize(prompt);
   const scored = [];
 
@@ -1508,6 +1634,7 @@ async function main() {
 
     if (cmd === "init") return await cmdInit();
     if (cmd === "index") return await cmdIndex();
+    if (cmd === "embed") return await cmdEmbed(args);
     if (cmd === "capture") return await cmdCapture(args);
     if (cmd === "work") return await cmdWork(args);
     if (cmd === "dream") return await cmdDream(args);
@@ -1526,6 +1653,7 @@ function printHelp() {
 Commands:
   node enkidu.js init
   node enkidu.js index
+  node enkidu.js embed
   node enkidu.js capture --title \"...\" --tags \"a,b\" --text \"...\"
   node enkidu.js work \"your prompt\"
   node enkidu.js dream
@@ -1535,6 +1663,7 @@ Env:
   OPENAI_API_KEY (required)
   OPENAI_MODEL (optional, default: ${DEFAULT_OPENAI_MODEL})
   OPENAI_BASE_URL (optional, default: ${DEFAULT_OPENAI_BASE_URL})
+  OPENAI_EMBEDDING_MODEL (optional, default: ${DEFAULT_EMBEDDING_MODEL})
 `);
 }
 
