@@ -331,19 +331,22 @@
       async function postJson(url, obj) {
         try {
           if (isDebugLogEnabled()) {
-            console.log('[enkidu] POST ' + url, 'request', obj);
+            console.groupCollapsed('[enkidu] POST ' + url);
+            console.log('request', obj);
           }
           const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(obj) });
           const text = await r.text();
           let out;
           try { out = JSON.parse(text); } catch { out = { error: text || ('HTTP ' + r.status) }; }
           if (isDebugLogEnabled()) {
-            console.log('[enkidu] POST ' + url, 'response', out);
+            console.log('response', out);
+            console.groupEnd();
           }
           return out;
         } catch (e) {
           if (isDebugLogEnabled()) {
             console.warn('[enkidu] POST failed ' + url, e);
+            try { console.groupEnd(); } catch {}
           }
           return { error: (e && e.message) ? e.message : String(e) };
         }
