@@ -10,6 +10,7 @@ original_path: pasted/20251224t204302z_ideas_part31.md
 source_set: ideas
 
 source_set_context: things i am learning like social science etc
+spaced-rep-priority: 4
 ---
 
 - Two contrasting views of rituals: (a) rituals instantiate and make social structure visible (who sits where, rank, precedence); (b) rituals are liminal moments of collective chaos/creative play that can invert or create new social forms (Boy Bishops, Lords of Misrule, youth abbeys).

@@ -132,14 +132,17 @@
                 <button id="clearHistoryBtn" class="btn btn-outline-secondary">Start over</button>
               </div>
               <div id="spacedRepPanel" class="mt-2 p-2 border rounded bg-light" style="display:none;">
-                <div class="small text-muted mb-1">Spaced repetition: rate your answer (1=wrong, 5=perfect)</div>
+                <div class="small text-muted mb-1">Spaced repetition: select your answer</div>
                 <div class="d-flex gap-2">
-                  <button class="btn btn-sm btn-outline-danger" data-sr-answer="1">1</button>
-                  <button class="btn btn-sm btn-outline-warning" data-sr-answer="2">2</button>
-                  <button class="btn btn-sm btn-outline-secondary" data-sr-answer="3">3</button>
-                  <button class="btn btn-sm btn-outline-primary" data-sr-answer="4">4</button>
-                  <button class="btn btn-sm btn-outline-success" data-sr-answer="5">5</button>
-                  <button id="srSkipBtn" class="btn btn-sm btn-outline-secondary ms-auto">Skip</button>
+                  <div class="d-flex flex-column gap-1">
+                    <button class="btn btn-sm btn-outline-primary" data-sr-answer="A" style="width: 40px;">A</button>
+                    <button class="btn btn-sm btn-outline-primary" data-sr-answer="B" style="width: 40px;">B</button>
+                    <button class="btn btn-sm btn-outline-primary" data-sr-answer="C" style="width: 40px;">C</button>
+                    <button class="btn btn-sm btn-outline-primary" data-sr-answer="D" style="width: 40px;">D</button>
+                    <button class="btn btn-sm btn-outline-primary" data-sr-answer="E" style="width: 40px;">E</button>
+                  </div>
+                  <div class="flex-grow-1"></div>
+                  <button id="srSkipBtn" class="btn btn-sm btn-outline-secondary align-self-start">Skip</button>
                 </div>
               </div>
               <div id="workStatus" class="mt-2 small text-muted"></div>
@@ -928,10 +931,14 @@
         workBtnNow.disabled = true;
         workStatus.textContent = 'Recording answer...';
         
+        // Map A-E to 1-5 for internal priority tracking.
+        const ratingMap = { 'A': 1, 'B': 2, 'C': 3, 'D': 4, 'E': 5 };
+        const numericRating = ratingMap[String(rating).toUpperCase()] || 3;
+        
         try {
           const resp = await postJson('/api/spaced-rep/submit', {
             memoryId: currentSrQuestion.memoryId,
-            rating: Number(rating) || 1,
+            rating: numericRating,
           });
           
           if (resp && resp.error) {
@@ -940,12 +947,12 @@
           }
           
           const feedback = resp && resp.newPriority !== undefined
-            ? `Recorded: ${rating}/5. Priority: ${resp.oldPriority || 0} → ${resp.newPriority}.`
-            : `Recorded: ${rating}/5.`;
+            ? `Recorded: ${rating}. Priority: ${resp.oldPriority || 0} → ${resp.newPriority}.`
+            : `Recorded: ${rating}.`;
           
           workStatus.textContent = feedback;
           const h = loadHistory();
-          h.push({ role: 'user', content: `[SR Answer: ${rating}/5]` });
+          h.push({ role: 'user', content: `[SR Answer: ${rating}]` });
           h.push({ role: 'assistant', content: feedback });
           saveHistory(h.slice(-20));
           renderHistory();

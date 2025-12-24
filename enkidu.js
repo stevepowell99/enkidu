@@ -3187,8 +3187,19 @@ export async function apiHandleRequest({ method, pathname, searchParams, headers
     
     const instruction = [
       "You are a spaced repetition quiz generator.",
-      "Given a memory note, create ONE clear test question (with 5 multiple-choice options if appropriate, or open-ended).",
-      "Keep it concise and focused on key concepts.",
+      "Given a memory note, create ONE clear multiple-choice question with exactly 5 options labeled A-E.",
+      "Format:",
+      "Question: [your question]",
+      "",
+      "A) [option]",
+      "B) [option]",
+      "C) [option]",
+      "D) [option]",
+      "E) [option]",
+      "",
+      "Correct answer: [A/B/C/D/E]",
+      "",
+      "Make options clear and focused on key concepts from the memory.",
     ].join("\n");
     
     const messages = [

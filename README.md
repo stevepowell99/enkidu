@@ -158,12 +158,12 @@ Hardcoded system for testing yourself on memory notes:
 
 1. **High-importance memories** (`importance: 2-3`) are **automatically included** for testing (no manual tagging needed).
 2. **Optional**: manually tag other memories with `spaced-rep: 1-3` (1=low, 3=high relevance).
-3. **Type `m `** (m + space) in the Work chat to get a random weighted question.
-4. **Rate your answer** 1-5 using the buttons (1=wrong, 5=perfect).
+3. **Type `m `** (m + space) in the Work chat to get a random weighted question with A-E options.
+4. **Select your answer** A-E using the buttons (A=wrong, E=perfect).
 5. **Priority adjusts automatically**:
-   - 1-2 (wrong) → priority +1 (ask more often)
-   - 3 (ok) → priority unchanged
-   - 4-5 (good) → priority -1 (ask less often)
+   - A-B (wrong) → priority +1 (ask more often)
+   - C (ok) → priority unchanged
+   - D-E (good) → priority -1 (ask less often)
 
 Front matter example:
 ```yaml
