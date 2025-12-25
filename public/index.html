@@ -770,13 +770,6 @@
       async function doWork(runNow) {
         const promptText = String(workPrompt.value || '').trim();
         
-        // Route "m ..." to spaced repetition instead of Work.
-        if (promptText.startsWith('m ')) {
-          workPrompt.value = '';
-          await doSpacedRep();
-          return;
-        }
-
         // Route "d ..." directly to Dream instead of Work.
         if (promptText.startsWith('d ')) {
           const dreamInstruction = promptText.slice(2).trim();
