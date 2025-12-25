@@ -86,9 +86,27 @@
     <div class="container py-4">
       <div class="enkidu-hero rounded-4 shadow-sm p-3 p-md-4 mb-3">
         <div class="d-flex align-items-center justify-content-between">
-          <div>
-            <div class="h3 m-0 text-white enkidu-title">Enkidu</div>
-            <div class="small enkidu-subtitle">Gilgamesh-flavoured, local-first assistant</div>
+          <div class="d-flex align-items-center gap-3">
+            <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 220 220" style="opacity: 0.9;">
+              <rect width="220" height="220" fill="none"/>
+              <g fill="#c9a227">
+                <rect x="18" y="22" width="10" height="42" rx="2"/>
+                <rect x="34" y="34" width="34" height="10" rx="2"/>
+                <rect x="74" y="22" width="10" height="42" rx="2"/>
+                <rect x="96" y="56" width="52" height="10" rx="2"/>
+                <rect x="148" y="30" width="10" height="36" rx="2"/>
+                <rect x="26" y="96" width="58" height="10" rx="2"/>
+                <rect x="26" y="114" width="10" height="52" rx="2"/>
+                <rect x="52" y="138" width="66" height="10" rx="2"/>
+                <rect x="134" y="108" width="10" height="62" rx="2"/>
+                <rect x="150" y="122" width="44" height="10" rx="2"/>
+                <rect x="166" y="150" width="28" height="10" rx="2"/>
+              </g>
+            </svg>
+            <div>
+              <div class="h3 m-0 text-white enkidu-title">Enkidu</div>
+              <div class="small enkidu-subtitle">Gilgamesh-flavoured, local-first assistant</div>
+            </div>
           </div>
           <div class="small enkidu-subtitle">UI</div>
         </div>
@@ -313,6 +331,14 @@
           const u = String(url || '').trim();
           if (!/^https?:\/\//i.test(u)) return text;
           return '<a href="' + u + '" target="_blank" rel="noopener noreferrer">' + text + '</a>';
+        });
+        
+        // Clickable buttons: [alphaNoSpaces] → button that sends that text.
+        // Match [A-Za-z0-9-_]+ but NOT inside <code> or <pre> or markdown links.
+        const buttonRe = /\[([A-Za-z0-9_-]+)\]/g;
+        s = s.replace(buttonRe, (m, btnText) => {
+          const escaped = escapeHtml(btnText);
+          return `<button class="btn btn-sm btn-outline-primary mx-1 enkidu-click-btn" data-btn-text="${escaped}">${escaped}</button>`;
         });
 
         // Paragraphs / line breaks (avoid touching <pre> blocks)
@@ -864,138 +890,6 @@
         usedSourcesEl.textContent = '';
       };
 
-      // Spaced repetition
-      let currentSrQuestion = null;
-
-      async function doSpacedRep() {
-        workBtn.disabled = true;
-        workBtnNow.disabled = true;
-        workStatus.textContent = 'Loading spaced repetition question...';
-        
-        try {
-          const resp = await postJson('/api/spaced-rep/next', { model: getSelectedModel() });
-          if (resp && resp.error) {
-            workStatus.textContent = 'Error: ' + resp.error;
-            const h = loadHistory();
-            h.push({ role: 'assistant', content: 'Spaced repetition: ' + resp.error });
-            saveHistory(h.slice(-20));
-            renderHistory();
-            return;
-          }
-          
-          if (!resp || !resp.question) {
-            workStatus.textContent = 'No spaced repetition items available.';
-            const h = loadHistory();
-            h.push({ role: 'assistant', content: 'No spaced repetition items found. Tag memories with "spaced-rep: 1-3" or set importance: 2-3.' });
-            saveHistory(h.slice(-20));
-            renderHistory();
-            return;
-          }
-
-          currentSrQuestion = resp;
-          
-          // Add question to history with inline A-E buttons on the left side.
-          const h = loadHistory();
-          h.push({ role: 'assistant', content: '[Spaced Rep]\n\n' + resp.question });
-          saveHistory(h.slice(-20));
-          renderHistory();
-          
-          // Create buttons vertically on the left side of the question.
-          const lastMsg = chatHistoryEl.lastElementChild;
-          if (lastMsg) {
-            const bubble = lastMsg.querySelector('div');
-            if (bubble) {
-              // Wrap existing content and add buttons on the left.
-              const originalContent = bubble.innerHTML;
-              bubble.innerHTML = `
-                <div class="d-flex gap-2">
-                  <div class="d-flex flex-column gap-1" style="min-width: 50px;">
-                    <button class="btn btn-sm btn-outline-primary" data-sr-inline="A" style="width: 40px;">A</button>
-                    <button class="btn btn-sm btn-outline-primary" data-sr-inline="B" style="width: 40px;">B</button>
-                    <button class="btn btn-sm btn-outline-primary" data-sr-inline="C" style="width: 40px;">C</button>
-                    <button class="btn btn-sm btn-outline-primary" data-sr-inline="D" style="width: 40px;">D</button>
-                    <button class="btn btn-sm btn-outline-primary" data-sr-inline="E" style="width: 40px;">E</button>
-                    <button class="btn btn-sm btn-outline-secondary mt-2" data-sr-inline="skip" style="width: 40px; font-size: 0.7rem;">Skip</button>
-                  </div>
-                  <div class="flex-grow-1">${originalContent}</div>
-                </div>
-              `;
-              
-              // Attach handlers.
-              bubble.querySelectorAll('[data-sr-inline]').forEach(btn => {
-                btn.onclick = () => {
-                  const ans = btn.getAttribute('data-sr-inline');
-                  if (ans === 'skip') {
-                    // Remove buttons but keep question visible.
-                    bubble.innerHTML = originalContent;
-                    currentSrQuestion = null;
-                    workStatus.textContent = 'Skipped.';
-                  } else {
-                    submitSrAnswer(ans, originalContent, bubble);
-                  }
-                };
-              });
-            }
-          }
-          
-          workStatus.textContent = 'Select your answer (A-E) or ask for clarification';
-        } finally {
-          workBtn.disabled = false;
-          workBtnNow.disabled = false;
-        }
-      }
-
-      async function submitSrAnswer(userAnswer, originalContent, bubble) {
-        if (!currentSrQuestion) return;
-        
-        // Replace buttons with just the question content.
-        if (bubble && originalContent) {
-          bubble.innerHTML = originalContent;
-        }
-        
-        workBtn.disabled = true;
-        workBtnNow.disabled = true;
-        workStatus.textContent = 'Recording answer...';
-        
-        // Extract correct answer from question (format: "Correct answer: B").
-        const correctMatch = String(currentSrQuestion.question || '').match(/Correct answer:\s*([A-E])/i);
-        const correctAnswer = correctMatch ? correctMatch[1].toUpperCase() : null;
-        const isCorrect = correctAnswer && userAnswer.toUpperCase() === correctAnswer;
-        
-        // Rating: correct → 5 (decrease priority), wrong → 1 (increase priority).
-        const numericRating = isCorrect ? 5 : 1;
-        
-        try {
-          const resp = await postJson('/api/spaced-rep/submit', {
-            memoryId: currentSrQuestion.memoryId,
-            rating: numericRating,
-          });
-          
-          if (resp && resp.error) {
-            workStatus.textContent = 'Error: ' + resp.error;
-            return;
-          }
-          
-          const result = isCorrect ? '✓ Correct' : `✗ Wrong (correct: ${correctAnswer || '?'})`;
-          const feedback = resp && resp.newPriority !== undefined
-            ? `${result}. Priority: ${resp.oldPriority || 0} → ${resp.newPriority}.`
-            : `${result}.`;
-          
-          workStatus.textContent = feedback + ' (You can ask follow-up questions about this)';
-          const h = loadHistory();
-          h.push({ role: 'user', content: `[SR Answer: ${userAnswer}]` });
-          h.push({ role: 'assistant', content: feedback });
-          saveHistory(h.slice(-20));
-          renderHistory();
-          
-          // Keep currentSrQuestion available for follow-up questions.
-          // It will be cleared when next "m " command is run.
-        } finally {
-          workBtn.disabled = false;
-          workBtnNow.disabled = false;
-        }
-      }
-
       const dreamBtn = document.getElementById('dreamBtn');
       const refreshDiaryBtn = document.getElementById('refreshDiaryBtn');
       const diarySelect = document.getElementById('diarySelect');
@@ -1210,6 +1104,17 @@
       renderHistory();
       refreshDiary();
       loadMemoriesTree();
+      
+      // Event delegation: handle clicks on [text] buttons rendered in chat.
+      chatHistoryEl.addEventListener('click', (e) => {
+        if (e.target && e.target.classList.contains('enkidu-click-btn')) {
+          const btnText = e.target.getAttribute('data-btn-text');
+          if (btnText) {
+            workPrompt.value = btnText;
+            workBtn.click();
+          }
+        }
+      });
     </script>
   </body>
 </html>

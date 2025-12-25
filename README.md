@@ -152,18 +152,23 @@ Every user input starting with `d ` (d + space) is routed directly to the Dreame
 
 This lets you give quick instructions to Dream from the chat without clicking the Dream button.  
 
+## Clickable buttons
+Any text Enkidu outputs in the format `[alphaNoSpaces]` becomes a clickable button. Click it to send that text as your next message.
+
+Examples: `[A]` `[Yes]` `[Tell-me-more]` `[Next]`
+
 ## Spaced repetition
 
-Hardcoded system for testing yourself on memory notes:
+Uses clickable buttons for testing:
 
-1. **High-importance memories** (`importance: 2-3`) are **automatically included** for testing (no manual tagging needed).
-2. **Optional**: manually tag other memories with `spaced-rep: 1-3` (1=low, 3=high relevance).
-3. **Type `m `** (m + space) OR **just ask for a quiz/test** — Enkidu will respond with a multiple-choice question.
-4. **Select your answer** A-E using the vertical buttons on the left side of the question.
-5. **Priority adjusts automatically**:
-   - Correct answer → priority -1 (ask less often)
-   - Wrong answer → priority +1 (ask more often)
-6. **Follow-up questions welcome** — after answering, you can ask for explanations or clarifications conversationally.
+1. **High-importance memories** (`importance: 2-3`) are automatically included for testing.
+2. **Optional**: manually tag memories with `spaced-rep: 1-3`.
+3. **Ask for a quiz** — "test me", "give me a question", etc.
+4. **Click your answer** — Enkidu outputs `[A]` `[B]` `[C]` `[D]` `[E]` as clickable buttons.
+5. **Automatic priority**:
+   - Correct → priority -1 (ask less often)
+   - Wrong → priority +1 (ask more often)
+6. **Follow-up questions welcome** — fully conversational after answering.
 
 Front matter example:
 ```yaml
