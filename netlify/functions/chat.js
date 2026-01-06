@@ -70,6 +70,7 @@ exports.handler = async (event) => {
     const body = JSON.parse(event.body || "{}");
     const message = String(body.message || "");
     let threadId = body.thread_id ? String(body.thread_id) : "";
+    const model = body.model ? String(body.model) : null;
 
     if (!message.trim()) return json(400, { error: "message is required" });
     assertNoSecrets(message);
@@ -82,6 +83,7 @@ exports.handler = async (event) => {
     const reply = await geminiGenerate({
       system,
       messages: [...history, { role: "user", text: message }],
+      model,
     });
 
     // Save user message

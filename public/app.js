@@ -48,6 +48,46 @@ async function apiFetch(path, { method = "GET", body } = {}) {
   return json;
 }
 
+function setModelOptions(models) {
+  const sel = $("chatModel");
+  sel.innerHTML = "";
+
+  const opts = (models || [])
+    .filter((m) => (m.supportedGenerationMethods || []).includes("generateContent"))
+    .map((m) => ({
+      name: m.name, // usually "models/<id>"
+      label: m.displayName || m.name,
+    }));
+
+  if (!opts.length) {
+    const o = document.createElement("option");
+    o.value = "";
+    o.textContent = "(no models)";
+    sel.appendChild(o);
+    return;
+  }
+
+  // Prefer gemini-3 pro/flash/nano if present (per your request), otherwise show all.
+  const preferred = [];
+  const rest = [];
+  for (const o of opts) {
+    const n = String(o.name).toLowerCase();
+    if (n.includes("gemini-3") && (n.includes("pro") || n.includes("flash") || n.includes("nano"))) {
+      preferred.push(o);
+    } else {
+      rest.push(o);
+    }
+  }
+  const ordered = preferred.length ? [...preferred, ...rest] : opts;
+
+  for (const o of ordered) {
+    const opt = document.createElement("option");
+    opt.value = o.name;
+    opt.textContent = o.label;
+    sel.appendChild(opt);
+  }
+}
+
 function parseTags(raw) {
   return String(raw || "")
     .split(",")
@@ -196,9 +236,10 @@ async function sendChat() {
   $("chatInput").value = "";
   setStatus("Sending...", "secondary");
 
+  const model = $("chatModel").value || null;
   const data = await apiFetch("/api/chat", {
     method: "POST",
-    body: { message: msg, thread_id: threadId || null },
+    body: { message: msg, thread_id: threadId || null, model },
   });
 
   $("threadId").value = data.thread_id;
@@ -222,6 +263,7 @@ function init() {
   $("saveToken").onclick = () => {
     setToken(($("adminToken").value || "").trim());
     setStatus("Token saved. Try search or chat.", "success");
+    loadModels().catch(() => {});
   };
 
   $("recallSearch").onclick = () => recallSearch().catch((e) => setStatus(e.message, "danger"));
@@ -237,7 +279,15 @@ function init() {
   // Try initial load if token exists.
   if (getToken()) {
     recallSearch().catch(() => {});
+    loadModels().catch(() => {});
   }
+}
+
+async function loadModels() {
+  setStatus("Loading models...", "secondary");
+  const data = await apiFetch("/api/models");
+  setModelOptions(data.models || []);
+  setStatus("Ready.", "success");
 }
 
 init();

@@ -8,12 +8,19 @@ function getGeminiConfig() {
   return { apiKey, model };
 }
 
-async function geminiGenerate({ system, messages }) {
-  const { apiKey, model } = getGeminiConfig();
+function normalizeModelName(model) {
+  const m = String(model || "").trim();
+  return m.startsWith("models/") ? m.slice("models/".length) : m;
+}
+
+async function geminiGenerate({ system, messages, model }) {
+  const cfg = getGeminiConfig();
+  const apiKey = cfg.apiKey;
+  const modelName = normalizeModelName(model || cfg.model);
 
   // AI Studio Gemini API (Generative Language API)
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
-    model
+    modelName
   )}:generateContent?key=${encodeURIComponent(apiKey)}`;
 
   const body = {
