@@ -1,15 +1,8 @@
 {
   "name": "enkidu",
   "private": true,
-  "version": "0.1.0",
-  "description": "Enkidu: local-first file-based assistant (CLI + tiny UI)",
-  "type": "module",
-  "scripts": {
-    "enkidu": "node enkidu.js",
-    "serve": "node enkidu.js serve",
-    "serve:watch": "node enkidu.js serve --watch --port 3000",
-    "init": "node enkidu.js init"
-  }
+  "version": "0.1.0"
+
 }
 
 

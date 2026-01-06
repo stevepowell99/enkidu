@@ -1,16 +1,34 @@
-﻿# Enkidu (local-first assistant)
+﻿# Enkidu (personalised assistant)
 
-Single-file Node app (`enkidu.js`) + file-based memory store (`memories/`) + editable prompts (`instructions/`).
+Single-file Node app (`enkidu.js`) 
 
-## Concept (from `enkidu.md`)
-- **Goal**: a personal assistant with a file-based memory architecture (inspired by Letta/MemGPT-style ideas).
-- **System instruction**: enforced by Cursor project rules (not editable by Enkidu).
-- **Soft architecture**: keep “what dreaming means” in editable text instructions where possible (`instructions/*.md`), not hard-coded behavior.
-- **Operations**:
-  - **work**: answer requests using system instruction + work instruction + retrieved context
-  - **dream**: reorganise/update memory + (optionally) update instructions
-  - **restructure**: improve the instruction/memory architecture to get better context selection
-- **Future (not implemented yet)**: background autonomy, Gmail/Drive/tools
+## Concept 
+
+Enkidu
+
+- This app is a General purpose ai assistant for both personal and professional use
+- It replaces all my chat bots, knowledge base, spaced repetition system....
+- I will be the only user.
+- It will use my Gemini API keys
+- Data is saved in "pages" which are rows in a SQL table.
+- We will use pgsql at supabase. The app will be pushed to GitHub and from there hosted at netlify. 
+- Any pages trying to save text containing highentropy secrets will fail with a warning
+- 
+- Basically 2 parts to the UI: a standard chat bot (which also restores from history) and a "recall" panel to find and display past pages
+- Pages have creation date, tags, key-value tags, unique IDs, and also a field to store ID of "next" page in a conversation.
+- There also are a smallish but extensible number of high-level pages eg
+  - User style preferences eg be succinct.....
+  - User bio
+  - Strategies for "dreaming" (see below)
+- As much as possible, functionality is provided by soft coding via the hi level pages, IE user and Enkidu can change/adapt them on the fly
+- If we think this will work well enough, we will create embeddings for each page using current best in-browser system. Not sure whether to have a parallel system of full embeddings from a large eg gemini model too
+- Can be used offline just for standard search and recall, saving notes, etc. I will use it both on phone and computer. sync challenge is resttricted to consolidating any work done offline.
+- Dreaming
+  - This is something that happens in down time: Enkidu works fairly randomly through the pages, improving organisation primarily with tags, identifying near duplicates etc
+- Recall panel
+  - A large editable field containing the markdown source of the page in edit mode, and html in read mode. 
+    - User can directly create new pages here
+  - A list of closely related pages according to timestamp, tags, thread (prev/next
 
 ## Requirements
 - Node.js 18+
@@ -30,127 +48,10 @@ Put these in `.env` (or real env vars). See `env.example`.
 - `SUPABASE_URL` (required if `ENKIDU_STORAGE=supabase`)
 - `SUPABASE_SERVICE_ROLE_KEY` (required if `ENKIDU_STORAGE=supabase`; keep server-side only)
 
-## Commands
-- `node enkidu.js serve --port 3000` (UI)
-- `npm run serve:watch` (UI dev restart; watches `enkidu.js` by default; set `ENKIDU_WATCH_INSTRUCTIONS=true` to also restart on `instructions/*.md`)
-- `node enkidu.js work "..."` (CLI work)
-- `node enkidu.js capture --title "..." --tags "a,b" --text "..."` (manual memory note)
-- `node enkidu.js dream --model gpt-5-mini` (autonomous memory re-org + diary; model optional)
-- `node enkidu.js embed` (rebuild/update memory embeddings cache; normally automatic)
-- `node enkidu.js migrate-ids` (one-time migration: add stable `id:` to memory notes; excludes verbatim sources)
 
 ## Hosting (Netlify + Supabase) (git-push deploy)
 
-### Supabase setup
-- Create a Supabase project (Postgres).
-- In Supabase SQL editor, run `supabase/schema.sql`.
 
-### Netlify setup
-- Connect this repo in Netlify (deploys on git push).
-- `netlify.toml` is included:
-  - publishes `public/`
-  - routes `/api/*` to a Netlify Function (`netlify/functions/api.mjs`)
-- Set Netlify environment variables:
-  - `ENKIDU_STORAGE=supabase`
-  - `OPENAI_API_KEY=...`
-  - `SUPABASE_URL=...`
-  - `SUPABASE_SERVICE_ROLE_KEY=...`
-
-## Secrets / git safety
-- `.env` is already in `.gitignore` (do not commit it).
-- **Never expose** `SUPABASE_SERVICE_ROLE_KEY` to the browser; it must only exist in Netlify env vars (server-side).
-
-## Core architecture (terse)
-
-### Memory store (writable)
-- **Local mode (`ENKIDU_STORAGE=local`)**:
-  - `memories/inbox|people|projects|howto/*.md`: curated memory notes
-  - front matter supports: `id` (stable), `title`, `created`, `tags`, `importance: 0..3`, `source`, etc
-  - `memories/sessions/recent.jsonl`: rolling session log (episodic memory)
-  - `memories/diary/*.md`: dream diary entries
-- **Supabase mode (`ENKIDU_STORAGE=supabase`)**:
-  - `memories` table: memory notes (stored as markdown strings + metadata)
-  - `session_events` table: session log
-  - `sources` table: verbatim sources (stored as markdown strings)
-
-### Generated caches (gitignored)
-- (Local mode only)
-  - `memories/_index.json`: index of memory notes (id + path + metadata + preview + importance)
-  - `memories/_embeddings.json`: embeddings cache for memory notes (keyed by `id`, stores hash + vector + last known path)
-  - `memories/_source_embeddings.json`: embeddings cache for stored verbatim sources
-
-### Instructions (soft architecture)
-- `instructions/work.md`: system prompt for `work` (also defines `===WEB_FETCH===` + `===CAPTURE===`)
-- `instructions/dream.md`: system prompt for `dream` (can edit `memories/` + `instructions/`, not code)
-- `instructions/sources.md`: system prompt for ingesting a source file into a curated memory note
-
-## Work pipeline (heuristic-first)
-1. **Heuristic router** decides whether to include recency and whether to do AI query expansion.
-2. **Recency** (if needed): include recent turns from local `memories/sessions/recent.jsonl` or Supabase `session_events`.
-3. **Retrieval**:
-   - local mode: embeddings retrieval over `memories/` (weighted by `importance`)
-   - supabase mode: simple keyword retrieval from `memories` table (no pgvector yet)
-   - optional AI query expansion for vague prompts
-4. **Sources retrieval** (if ingested): local mode only (embeddings over `memories/sources/verbatim/`).
-   - default excerpt size: 4k chars
-   - if prompt asks for “verbatim / quote / full text”: include up to 20k chars
-5. **Answer call** → response + `===CAPTURE=== ...` (auto-capture writes to inbox and updates embeddings)
-
-Implementation detail (UI):
-- Work runs as **plan → answer** (`/api/work/plan` then `/api/work/answer`) so the UI can show “Used memories/sources” before the final response.
-- `/api/work/answer` supports **cache-miss recovery** (server restart between calls) via `planEcho`.
-
-### Work context composition (fact-first + small preferences slice)
-- Work includes **mostly factual/project context** plus a tiny **preferences slice** (style/habits), selected by tags (`style`, `preference`, `habits`) and capped to a small fraction of the memory budget.
-
-## Dataflow (local mode)
-
-```mermaid
-flowchart TD
-Notes[NotesMdFiles] --> Index[IndexJson_ById]
-Notes --> Embed[Embeddings_ById]
-Work[WorkPrompt] --> Retrieve[RetrieveFactsPlusPrefs]
-Retrieve --> Embed
-Retrieve --> Index
-Retrieve --> Context[PromptContext]
-Context --> LLM[LLMAnswer]
-Dream[Dream] --> Notes
-Dream --> Index
-Dream --> Embed
-```
-
-UI shows:
-- “Used memories” (and their importance)
-- “Used sources”
-
-## Dream
-- Local mode: Dream can modify only `memories/` and `instructions/`.
-- Supabase mode (hosted): Dream can modify only `memories/` (instructions are read-only in the deployed repo).
-- It cannot edit `enkidu.js` or the generated caches.
-- After dream edits, embeddings are refreshed incrementally (hash-based).
-
-Implementation detail (UI):
-- Dream runs as **plan → execute** (`/api/dream/plan` then `/api/dream/execute`) with an elapsed-time ticker.
-- `/api/dream/execute` supports **cache-miss recovery** (server restart between calls).
-
-## Sources (ingest)
-UI “Sources (ingest)”:
-- select a folder of `.md` files (subfolders allowed), or paste plain text
-- click **Ingest** / **Ingest text**
-- local mode server writes:
-  - verbatim store: `memories/sources/verbatim/*.md` (read-only)
-  - curated memory notes filed to `memories/{inbox,people,projects,howto}/`
-  - source embeddings for later retrieval
-- supabase mode server writes:
-  - `sources` table rows (verbatim markdown)
-  - `memories` table rows (curated notes)
-
-## Direct to dream
-Every user input starting with `d ` (d + space) is routed directly to the Dreamer instead of Work, e.g.:
-- `d tag the last imported notes as recipes`
-- `d move all the learning notes into a subfolder`
-
-This lets you give quick instructions to Dream from the chat without clicking the Dream button.  
 
 ## Clickable buttons
 Any text Enkidu outputs in the format `[alphaNoSpaces]` becomes a clickable button. Click it to send that text as your next message.
@@ -170,11 +71,6 @@ Uses clickable buttons for testing:
    - Wrong → priority +1 (ask more often)
 6. **Follow-up questions welcome** — fully conversational after answering.
 
-Front matter example:
-```yaml
-importance: 3
-tags: concepts, spaced-rep: 3
-spaced-rep-priority: 3
-```
+
 
 The system picks questions with weighted randomness: high-priority items are tested more frequently. Dream will auto-tag high-importance notes with `spaced-rep: 3` going forward.
