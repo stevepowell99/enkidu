@@ -1,6 +1,6 @@
 ﻿# Enkidu (personalised assistant)
 
-Single-file Node app (`enkidu.js`) 
+Minimal Netlify app (static Bootstrap UI + Netlify Functions)
 
 ## Concept 
 
@@ -35,21 +35,33 @@ Enkidu
 
 ## Environment
 Put these in `.env` (or real env vars). See `env.example`.
-- `OPENAI_API_KEY` (required)
-- `OPENAI_BASE_URL` (optional, default `https://api.openai.com/v1`)
-- `OPENAI_MODEL` (optional, default `gpt-4o-mini`)
-- `OPENAI_EMBEDDING_MODEL` (optional, default `text-embedding-3-small`)
-- `ENKIDU_OPENAI_RETRIES` (optional, default `4`)
-- `ENKIDU_EMBED_MAX_TOKENS` (optional, embedding input budget, default `7800`)
-- `ENKIDU_WORK_MEM_TOP` (optional, max memories included in Work, default `5`)
-- `ENKIDU_WORK_SRC_TOP` (optional, max sources included in Work, default `3`)
-- `ENKIDU_PREF_TAGS` (optional, comma-separated tags treated as “preferences slice”, default `style,preference,habits`)
-- `ENKIDU_STORAGE` (`local` default; `supabase` to use Supabase SQL)
-- `SUPABASE_URL` (required if `ENKIDU_STORAGE=supabase`)
-- `SUPABASE_SERVICE_ROLE_KEY` (required if `ENKIDU_STORAGE=supabase`; keep server-side only)
+- `ENKIDU_ADMIN_TOKEN` (required; keep private)
+- `SUPABASE_URL` (required)
+- `SUPABASE_SERVICE_ROLE_KEY` (required; server-side only; use Supabase \"secret\" key)
+- `GEMINI_API_KEY` (required; server-side only)
+- `GEMINI_MODEL` (optional; default `gemini-1.5-flash`)
 
 
 ## Hosting (Netlify + Supabase) (git-push deploy)
+
+### Supabase
+- Create a new Supabase project.
+- Run `supabase/schema.sql` in Supabase SQL editor (creates `public.pages`).
+
+### Netlify
+- Import the GitHub repo in Netlify.
+- Ensure `netlify.toml` is present (it routes `/api/*` to functions).
+- Set Netlify environment variables:
+  - `ENKIDU_ADMIN_TOKEN`
+  - `SUPABASE_URL`
+  - `SUPABASE_SERVICE_ROLE_KEY`
+  - `GEMINI_API_KEY`
+  - `GEMINI_MODEL` (optional)
+
+### App usage
+- Open the site, paste your admin token into the top-right input, click **Save**.
+- Chat is saved as pages tagged `chat` with `kv_tags.role` set to `user` / `assistant`.
+- Recall lets you search and edit pages as markdown.
 
 
 

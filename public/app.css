@@ -1,0 +1,27 @@
+.enkidu-scroll {
+  height: 60vh;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+.enkidu-msg {
+  padding: 0.5rem;
+  border-radius: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.enkidu-msg-user {
+  background: #e7f1ff;
+  border: 1px solid #cfe2ff;
+}
+
+.enkidu-msg-assistant {
+  background: #f8f9fa;
+  border: 1px solid #e9ecef;
+}
+
+.enkidu-preview p:last-child {
+  margin-bottom: 0;
+}
+
+

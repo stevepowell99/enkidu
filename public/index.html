@@ -10,17 +10,112 @@
       href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
       rel="stylesheet"
     />
+
+    <!-- Markdown render (preview only) -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+
+    <link rel="stylesheet" href="/app.css" />
   </head>
   <body class="bg-light">
-    <main class="container py-5">
-      <div class="p-4 bg-white border rounded">
-        <h1 class="h3 mb-2">Enkidu</h1>
-        <p class="text-secondary mb-0">
-          Placeholder page so Netlify has a publish directory. Next change will add the
-          actual chat + recall UI.
-        </p>
+    <main class="container-fluid py-3">
+      <!-- Top bar -->
+      <div class="row g-3 align-items-end mb-2">
+        <div class="col">
+          <h1 class="h4 mb-0">Enkidu</h1>
+          <div class="text-secondary small">Chat + recall (Supabase Postgres + Netlify Functions + Gemini)</div>
+        </div>
+        <div class="col-auto">
+          <label class="form-label small mb-1" for="adminToken">Admin token</label>
+          <div class="input-group">
+            <input id="adminToken" class="form-control form-control-sm" type="password" placeholder="ENKIDU_ADMIN_TOKEN" />
+            <button id="saveToken" class="btn btn-sm btn-primary" type="button">Save</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="status" class="alert alert-secondary py-2 small mb-3" role="status">
+        Not connected yet.
+      </div>
+
+      <!-- Two-panel layout -->
+      <div class="row g-3">
+        <!-- Chat panel -->
+        <div class="col-12 col-lg-6">
+          <div class="card h-100">
+            <div class="card-header d-flex gap-2 align-items-center">
+              <div class="fw-semibold">Chat</div>
+              <div class="ms-auto d-flex gap-2 align-items-center">
+                <label class="form-label small mb-0" for="threadId">Thread</label>
+                <input id="threadId" class="form-control form-control-sm" style="width: 18rem" placeholder="(auto)" />
+              </div>
+            </div>
+            <div class="card-body">
+              <div id="chatLog" class="enkidu-scroll border rounded p-2 bg-light"></div>
+              <div class="mt-2 input-group">
+                <textarea id="chatInput" class="form-control" rows="2" placeholder="Message..."></textarea>
+                <button id="sendChat" class="btn btn-primary" type="button">Send</button>
+              </div>
+              <div class="mt-2 d-flex gap-2">
+                <button id="reloadChat" class="btn btn-sm btn-outline-secondary" type="button">Reload thread</button>
+                <button id="newThread" class="btn btn-sm btn-outline-secondary" type="button">New thread</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Recall panel -->
+        <div class="col-12 col-lg-6">
+          <div class="card h-100">
+            <div class="card-header fw-semibold">Recall</div>
+            <div class="card-body">
+              <div class="input-group mb-2">
+                <input id="recallQuery" class="form-control" placeholder="Search (substring)..." />
+                <button id="recallSearch" class="btn btn-outline-primary" type="button">Search</button>
+              </div>
+
+              <div class="row g-2">
+                <div class="col-12 col-md-5">
+                  <div id="recallResults" class="enkidu-scroll border rounded p-2 bg-light"></div>
+                </div>
+                <div class="col-12 col-md-7">
+                  <div class="mb-2 d-flex gap-2">
+                    <button id="newPage" class="btn btn-sm btn-outline-secondary" type="button">New page</button>
+                    <button id="savePage" class="btn btn-sm btn-primary" type="button">Save</button>
+                    <button id="deletePage" class="btn btn-sm btn-outline-danger" type="button">Delete</button>
+                  </div>
+
+                  <div class="mb-2">
+                    <label class="form-label small mb-1" for="pageTitle">Title</label>
+                    <input id="pageTitle" class="form-control form-control-sm" />
+                  </div>
+
+                  <div class="mb-2">
+                    <label class="form-label small mb-1" for="pageTags">Tags (comma-separated)</label>
+                    <input id="pageTags" class="form-control form-control-sm" placeholder="e.g. style, preference" />
+                  </div>
+
+                  <div class="mb-2">
+                    <label class="form-label small mb-1" for="pageContent">Markdown</label>
+                    <textarea id="pageContent" class="form-control" rows="10"></textarea>
+                  </div>
+
+                  <div class="mb-2">
+                    <label class="form-label small mb-1">Preview</label>
+                    <div id="pagePreview" class="border rounded p-2 bg-white enkidu-preview"></div>
+                  </div>
+
+                  <div class="text-secondary small">
+                    Selected page id: <span id="pageId">(none)</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
     </main>
+
+    <script src="/app.js"></script>
   </body>
 </html>
 
