@@ -24,4 +24,14 @@
   margin-bottom: 0;
 }
 
+.enkidu-result-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-start;
+}
+
+.enkidu-result-row input[type="checkbox"] {
+  margin-top: 0.35rem;
+}
+
 

@@ -13,3 +13,6 @@ memories/_embeddings.json
 memories/_source_embeddings.json
 
 # Editor/workspace
+
+# Local Netlify folder
+.netlify

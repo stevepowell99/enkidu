@@ -3,7 +3,8 @@
 
 function getGeminiConfig() {
   const apiKey = process.env.GEMINI_API_KEY;
-  const model = process.env.GEMINI_MODEL || "gemini-1.5-flash";
+  // Default model (Jan 2026): keep aligned with the UI default.
+  const model = process.env.GEMINI_MODEL || "gemini-3-flash-preview";
   if (!apiKey) throw new Error("Missing GEMINI_API_KEY");
   return { apiKey, model };
 }

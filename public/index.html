@@ -45,12 +45,17 @@
             <div class="card-header d-flex gap-2 align-items-center">
               <div class="fw-semibold">Chat</div>
               <div class="ms-auto d-flex gap-2 align-items-center">
+                <span class="badge text-bg-secondary" id="payloadCount" title="Selected recall pages to include in the next chat request">Payload: 0</span>
+                <button id="clearPayload" class="btn btn-sm btn-outline-secondary" type="button">Clear</button>
+                <button id="runDream" class="btn btn-sm btn-outline-secondary" type="button">Dream</button>
                 <label class="form-label small mb-0" for="chatModel">Model</label>
                 <select id="chatModel" class="form-select form-select-sm" style="width: 14rem">
                   <option value="">(loading...)</option>
                 </select>
-                <label class="form-label small mb-0" for="threadId">Thread</label>
-                <input id="threadId" class="form-control form-control-sm" style="width: 18rem" placeholder="(auto)" />
+                <label class="form-label small mb-0" for="threadSelect">Thread</label>
+                <select id="threadSelect" class="form-select form-select-sm" style="width: 18rem">
+                  <option value="">(new thread)</option>
+                </select>
               </div>
             </div>
             <div class="card-body">
@@ -70,10 +75,22 @@
         <!-- Recall panel -->
         <div class="col-12 col-lg-6">
           <div class="card h-100">
-            <div class="card-header fw-semibold">Recall</div>
+            <div class="card-header d-flex gap-2 align-items-center">
+              <div class="fw-semibold">Recall</div>
+              <div class="ms-auto d-flex gap-2 align-items-center">
+                <label class="form-label small mb-0" for="relatedPreset">Related preset</label>
+                <select id="relatedPreset" class="form-select form-select-sm" style="width: 14rem">
+                  <option value="mixed">Mixed</option>
+                  <option value="time">Time only</option>
+                  <option value="tags">Tags only</option>
+                  <option value="text">Text similarity only</option>
+                </select>
+              </div>
+            </div>
             <div class="card-body">
               <div class="input-group mb-2">
                 <input id="recallQuery" class="form-control" placeholder="Search (substring)..." />
+                <input id="recallTag" class="form-control" placeholder="Tag filter (single tag)..." />
                 <button id="recallSearch" class="btn btn-outline-primary" type="button">Search</button>
               </div>
 
@@ -84,6 +101,12 @@
                 <div class="col-12 col-md-7">
                   <div class="mb-2 d-flex gap-2">
                     <button id="newPage" class="btn btn-sm btn-outline-secondary" type="button">New page</button>
+                    <button id="newSystemCard" class="btn btn-sm btn-outline-secondary" type="button">New system card</button>
+                    <button id="newStyleCard" class="btn btn-sm btn-outline-secondary" type="button">New style card</button>
+                    <button id="newBioCard" class="btn btn-sm btn-outline-secondary" type="button">New bio card</button>
+                    <button id="newStrategyCard" class="btn btn-sm btn-outline-secondary" type="button">New strategy card</button>
+                    <button id="newDreamCard" class="btn btn-sm btn-outline-secondary" type="button">New dream card</button>
+                    <button id="newSplitCard" class="btn btn-sm btn-outline-secondary" type="button">New split card</button>
                     <button id="savePage" class="btn btn-sm btn-primary" type="button">Save</button>
                     <button id="deletePage" class="btn btn-sm btn-outline-danger" type="button">Delete</button>
                   </div>
