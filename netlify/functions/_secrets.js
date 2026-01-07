@@ -31,7 +31,16 @@ function findLikelySecret(text) {
   return null;
 }
 
-function assertNoSecrets(text) {
+function isAllowSecrets(event) {
+  // Purpose: optional override for false positives.
+  // Frontend sends: x-enkidu-allow-secrets: "1"
+  const h = event?.headers || {};
+  const v = h["x-enkidu-allow-secrets"] || h["X-Enkidu-Allow-Secrets"] || "";
+  return String(v).trim() === "1";
+}
+
+function assertNoSecrets(text, { allow = false } = {}) {
+  if (allow) return;
   const reason = findLikelySecret(text);
   if (reason) {
     const err = new Error(`Refusing to save content: possible secret detected. (${reason})`);
@@ -40,6 +49,6 @@ function assertNoSecrets(text) {
   }
 }
 
-module.exports = { assertNoSecrets, findLikelySecret };
+module.exports = { assertNoSecrets, findLikelySecret, isAllowSecrets };
 
 

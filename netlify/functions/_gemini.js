@@ -5,8 +5,10 @@ function getGeminiConfig() {
   const apiKey = process.env.GEMINI_API_KEY;
   // Default model (Jan 2026): keep aligned with the UI default.
   const model = process.env.GEMINI_MODEL || "gemini-3-flash-preview";
+  // Default embeddings model: stable + cheap enough for personal scale.
+  const embedModel = process.env.GEMINI_EMBED_MODEL || "text-embedding-004";
   if (!apiKey) throw new Error("Missing GEMINI_API_KEY");
-  return { apiKey, model };
+  return { apiKey, model, embedModel };
 }
 
 function normalizeModelName(model) {
@@ -52,6 +54,87 @@ async function geminiGenerate({ system, messages, model }) {
   return text;
 }
 
-module.exports = { geminiGenerate };
+async function geminiEmbed({ text, model, taskType = "RETRIEVAL_DOCUMENT" }) {
+  // Purpose: server-side embeddings for storing in pgvector.
+  const cfg = getGeminiConfig();
+  const apiKey = cfg.apiKey;
+  const modelName = normalizeModelName(model || cfg.embedModel);
+
+  // AI Studio Gemini API (Generative Language API)
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
+    modelName
+  )}:embedContent?key=${encodeURIComponent(apiKey)}`;
+
+  const body = {
+    content: { parts: [{ text: String(text || "") }] },
+    taskType,
+  };
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  const json = await res.json().catch(() => null);
+  if (!res.ok) {
+    const msg = json ? JSON.stringify(json) : `${res.status} ${res.statusText}`;
+    throw new Error(`Gemini embed error: ${msg}`);
+  }
+
+  const values = json?.embedding?.values;
+  if (!Array.isArray(values) || !values.length) {
+    throw new Error(`Gemini embed error: missing embedding.values`);
+  }
+  return { model: modelName, values };
+}
+
+async function geminiBatchEmbed({ texts, model, taskType = "RETRIEVAL_DOCUMENT" }) {
+  // Purpose: batch embeddings to avoid per-page API calls (important for multi-page writes).
+  const cfg = getGeminiConfig();
+  const apiKey = cfg.apiKey;
+  const modelName = normalizeModelName(model || cfg.embedModel);
+
+  const items = Array.isArray(texts) ? texts.map((t) => String(t || "")) : [];
+  if (!items.length) return { model: modelName, embeddings: [] };
+
+  // AI Studio Gemini API (Generative Language API)
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
+    modelName
+  )}:batchEmbedContent?key=${encodeURIComponent(apiKey)}`;
+
+  const body = {
+    requests: items.map((text) => ({
+      content: { parts: [{ text }] },
+      taskType,
+    })),
+  };
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  const json = await res.json().catch(() => null);
+  if (!res.ok) {
+    const msg = json ? JSON.stringify(json) : `${res.status} ${res.statusText}`;
+    throw new Error(`Gemini batch embed error: ${msg}`);
+  }
+
+  const embeddings = json?.embeddings;
+  if (!Array.isArray(embeddings)) {
+    throw new Error(`Gemini batch embed error: missing embeddings[]`);
+  }
+
+  const out = embeddings.map((e) => e?.values);
+  if (out.some((v) => !Array.isArray(v) || !v.length)) {
+    throw new Error(`Gemini batch embed error: missing embeddings[].values`);
+  }
+
+  return { model: modelName, embeddings: out };
+}
+
+module.exports = { geminiGenerate, geminiEmbed, geminiBatchEmbed };
 
 

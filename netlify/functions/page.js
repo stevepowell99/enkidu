@@ -3,7 +3,8 @@
 
 const { requireAdmin } = require("./_auth");
 const { supabaseRequest } = require("./_supabase");
-const { assertNoSecrets } = require("./_secrets");
+const { assertNoSecrets, isAllowSecrets } = require("./_secrets");
+const { makeEmbeddingFields } = require("./_embeddings");
 
 function getId(event) {
   return event.queryStringParameters?.id || "";
@@ -35,6 +36,7 @@ exports.handler = async (event) => {
     }
 
     if (event.httpMethod === "PUT") {
+      const allowSecrets = isAllowSecrets(event);
       const body = JSON.parse(event.body || "{}");
 
       // Only allow updating these fields.
@@ -50,7 +52,11 @@ exports.handler = async (event) => {
 
       if (patch.content_md !== undefined) {
         if (!patch.content_md.trim()) return { statusCode: 400, body: "content_md is required" };
-        assertNoSecrets(patch.content_md);
+        assertNoSecrets(patch.content_md, { allow: allowSecrets });
+
+        // Embed inline so update stays fast (no extra PATCH round-trip).
+        const embed = await makeEmbeddingFields({ content_md: patch.content_md });
+        if (embed) Object.assign(patch, embed);
       }
 
       const rows = await supabaseRequest(`pages`, {

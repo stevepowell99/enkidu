@@ -5,7 +5,8 @@
 const { requireAdmin } = require("./_auth");
 const { supabaseRequest } = require("./_supabase");
 const { geminiGenerate } = require("./_gemini");
-const { assertNoSecrets } = require("./_secrets");
+const { assertNoSecrets, isAllowSecrets } = require("./_secrets");
+const { makeEmbeddingFields } = require("./_embeddings");
 
 function json(statusCode, obj) {
   return {
@@ -84,6 +85,7 @@ exports.handler = async (event) => {
   }
 
   try {
+    const allowSecrets = isAllowSecrets(event);
     const body = JSON.parse(event.body || "{}");
     const limit = Math.min(12, Math.max(1, Number(body.limit || 8)));
 
@@ -96,6 +98,9 @@ exports.handler = async (event) => {
     if (!candidates.length) {
       return json(200, { updated: 0, diaryPageId: null, candidates: 0, message: "No candidates." });
     }
+
+    // Fast lookup so we can re-embed even when only metadata changes.
+    const contentById = new Map(candidates.map((p) => [String(p.id), String(p.content_md || "")]));
 
     const prompt = `${dreamPrompt}\n\nPages:\n${candidates
       .map((p, i) => `#${i + 1} id=${p.id}\ncontent:\n${String(p.content_md || "").slice(0, 2000)}\n`)
@@ -125,7 +130,7 @@ exports.handler = async (event) => {
       if (patch.title === undefined && patch.tags === undefined && patch.kv_tags === undefined) continue;
 
       // Secret blocking on any new title/summary (cheap safety).
-      if (patch.title) assertNoSecrets(patch.title);
+      if (patch.title) assertNoSecrets(patch.title, { allow: allowSecrets });
 
       await supabaseRequest("pages", {
         method: "PATCH",
@@ -142,7 +147,8 @@ exports.handler = async (event) => {
       `Updated pages (${updated}):\n` +
       changedIds.map((id) => `- ${id}`).join("\n");
 
-    assertNoSecrets(diaryContent);
+    assertNoSecrets(diaryContent, { allow: allowSecrets });
+    const embed = await makeEmbeddingFields({ content_md: diaryContent });
     const diaryRows = await supabaseRequest("pages", {
       method: "POST",
       query: "?select=id",
@@ -153,12 +159,15 @@ exports.handler = async (event) => {
         kv_tags: { kind: "dream", updated },
         thread_id: null,
         next_page_id: null,
+        ...(embed || {}),
       },
     });
 
+    const diaryPageId = diaryRows?.[0]?.id || null;
+
     return json(200, {
       updated,
-      diaryPageId: diaryRows?.[0]?.id || null,
+      diaryPageId,
       candidates: candidates.length,
       proposed: updates.length,
     });

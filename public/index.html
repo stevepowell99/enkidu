@@ -30,6 +30,10 @@
             <input id="adminToken" class="form-control form-control-sm" type="password" placeholder="ENKIDU_ADMIN_TOKEN" />
             <button id="saveToken" class="btn btn-sm btn-primary" type="button">Save</button>
           </div>
+          <div class="form-check form-switch mt-1">
+            <input class="form-check-input" type="checkbox" role="switch" id="allowSecrets" />
+            <label class="form-check-label small" for="allowSecrets">Allow suspected secrets (override)</label>
+          </div>
         </div>
       </div>
 
@@ -48,6 +52,7 @@
                 <span class="badge text-bg-secondary" id="payloadCount" title="Selected recall pages to include in the next chat request">Payload: 0</span>
                 <button id="clearPayload" class="btn btn-sm btn-outline-secondary" type="button">Clear</button>
                 <button id="runDream" class="btn btn-sm btn-outline-secondary" type="button">Dream</button>
+                <button id="runBackfillEmbeddings" class="btn btn-sm btn-outline-secondary" type="button">Backfill embeddings</button>
                 <label class="form-label small mb-0" for="chatModel">Model</label>
                 <select id="chatModel" class="form-select form-select-sm" style="width: 14rem">
                   <option value="">(loading...)</option>
@@ -65,6 +70,7 @@
                 <button id="sendChat" class="btn btn-primary" type="button">Send</button>
               </div>
               <div class="mt-2 d-flex gap-2">
+                <button id="findSimilar" class="btn btn-sm btn-outline-secondary" type="button">Find Similar</button>
                 <button id="reloadChat" class="btn btn-sm btn-outline-secondary" type="button">Reload thread</button>
                 <button id="newThread" class="btn btn-sm btn-outline-secondary" type="button">New thread</button>
               </div>
@@ -90,7 +96,10 @@
             <div class="card-body">
               <div class="input-group mb-2">
                 <input id="recallQuery" class="form-control" placeholder="Search (substring)..." />
-                <input id="recallTag" class="form-control" placeholder="Tag filter (single tag)..." />
+                <input id="recallTag" class="form-control" placeholder="Tag filter (single tag)..." list="tagSuggestions" />
+                <datalist id="tagSuggestions"></datalist>
+                <input id="recallKvKey" class="form-control" placeholder="KV key (e.g. role)" />
+                <input id="recallKvValue" class="form-control" placeholder="KV value (e.g. assistant)" />
                 <button id="recallSearch" class="btn btn-outline-primary" type="button">Search</button>
               </div>
 
@@ -101,12 +110,12 @@
                 <div class="col-12 col-md-7">
                   <div class="mb-2 d-flex gap-2">
                     <button id="newPage" class="btn btn-sm btn-outline-secondary" type="button">New page</button>
-                    <button id="newSystemCard" class="btn btn-sm btn-outline-secondary" type="button">New system card</button>
-                    <button id="newStyleCard" class="btn btn-sm btn-outline-secondary" type="button">New style card</button>
-                    <button id="newBioCard" class="btn btn-sm btn-outline-secondary" type="button">New bio card</button>
-                    <button id="newStrategyCard" class="btn btn-sm btn-outline-secondary" type="button">New strategy card</button>
-                    <button id="newDreamCard" class="btn btn-sm btn-outline-secondary" type="button">New dream card</button>
-                    <button id="newSplitCard" class="btn btn-sm btn-outline-secondary" type="button">New split card</button>
+                    <button id="newSystemCard" class="btn btn-sm btn-outline-secondary" type="button">New system base page</button>
+                    <button id="newStyleCard" class="btn btn-sm btn-outline-secondary" type="button">New style base page</button>
+                    <button id="newBioCard" class="btn btn-sm btn-outline-secondary" type="button">New bio base page</button>
+                    <button id="newStrategyCard" class="btn btn-sm btn-outline-secondary" type="button">New strategy base page</button>
+                    <button id="newDreamCard" class="btn btn-sm btn-outline-secondary" type="button">New dream base page</button>
+                    <button id="newSplitCard" class="btn btn-sm btn-outline-secondary" type="button">New split base page</button>
                     <button id="savePage" class="btn btn-sm btn-primary" type="button">Save</button>
                     <button id="deletePage" class="btn btn-sm btn-outline-danger" type="button">Delete</button>
                   </div>
@@ -122,12 +131,22 @@
                   </div>
 
                   <div class="mb-2">
+                    <label class="form-label small mb-1" for="pageKvTags">KV tags (JSON)</label>
+                    <textarea
+                      id="pageKvTags"
+                      class="form-control form-control-sm font-monospace"
+                      rows="2"
+                      placeholder='e.g. {"role":"assistant","kind":"note"}'
+                    ></textarea>
+                  </div>
+
+                  <div class="mb-2">
                     <label class="form-label small mb-1" for="pageContent">Markdown</label>
                     <textarea id="pageContent" class="form-control" rows="10"></textarea>
                   </div>
 
                   <div class="mb-2">
-                    <label class="form-label small mb-1">Preview</label>
+                    <label class="form-label small mb-1">Rendered (double-click to edit)</label>
                     <div id="pagePreview" class="border rounded p-2 bg-white enkidu-preview"></div>
                   </div>
 

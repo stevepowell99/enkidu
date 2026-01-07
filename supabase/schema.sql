@@ -4,6 +4,9 @@
 -- Needed for gen_random_uuid()
 create extension if not exists pgcrypto;
 
+-- Needed for server-side embeddings storage
+create extension if not exists vector;
+
 -- Core table: pages
 create table if not exists public.pages (
   id uuid primary key default gen_random_uuid(),
@@ -24,8 +27,18 @@ create table if not exists public.pages (
 
   -- Simple tags and key-value tags for soft-coded behaviors
   tags text[] not null default '{}'::text[],
-  kv_tags jsonb not null default '{}'::jsonb
+  kv_tags jsonb not null default '{}'::jsonb,
+
+  -- Server-side embeddings (pgvector). Written by Netlify functions on create/update.
+  embedding vector(768) null,
+  embedding_model text null,
+  embedding_updated_at timestamptz null
 );
+
+-- Ensure embedding columns exist if the table was created before embeddings were added.
+alter table public.pages add column if not exists embedding vector(768);
+alter table public.pages add column if not exists embedding_model text;
+alter table public.pages add column if not exists embedding_updated_at timestamptz;
 
 -- Keep updated_at fresh on updates
 create or replace function public.set_updated_at()
@@ -53,5 +66,43 @@ create index if not exists pages_kv_tags_gin_idx on public.pages using gin (kv_t
 -- Full-text search on content (simple, no generated columns)
 create index if not exists pages_content_fts_idx
 on public.pages using gin (to_tsvector('english', content_md));
+
+-- Vector similarity search (used by /api/pages?related_to=...).
+-- Note: kept minimal: returns nearest pages by L2 distance (<->).
+create or replace function public.match_pages(
+  query_embedding vector(768),
+  match_count int default 50
+)
+returns table (
+  id uuid,
+  created_at timestamptz,
+  updated_at timestamptz,
+  thread_id uuid,
+  next_page_id uuid,
+  title text,
+  tags text[],
+  kv_tags jsonb,
+  content_md text,
+  distance float
+)
+language sql
+stable
+as $$
+  select
+    p.id,
+    p.created_at,
+    p.updated_at,
+    p.thread_id,
+    p.next_page_id,
+    p.title,
+    p.tags,
+    p.kv_tags,
+    p.content_md,
+    (p.embedding <-> query_embedding) as distance
+  from public.pages p
+  where p.embedding is not null
+  order by p.embedding <-> query_embedding
+  limit least(greatest(match_count, 1), 200);
+$$;
 
 

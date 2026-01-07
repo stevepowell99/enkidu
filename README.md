@@ -17,17 +17,18 @@ Enkidu
 - Any pages trying to save text containing highentropy secrets will fail with a warning
 - 
 - Basically 2 parts to the UI: a standard chat bot (which also restores from history) and a "recall" panel to find and display past pages
-- There also are a smallish but extensible number of high-level "preference cards" pages eg
-  - User style preferences eg be succinct.....
-  - User bio
-  - Strategies for "dreaming" (see below)
-- As much as possible, functionality is provided by soft coding via the hi level pages, IE user and Enkidu can change/adapt them on the fly
+- There also are a smallish but extensible number of high-level **base pages** (they are just normal pages distinguished by tags) e.g.
+  - `system` (system prompt)
+  - `style` / `bio` / `strategy` (preference base pages)
+  - `dream-prompt` (dreaming instructions)
+  - `split-prompt` (instructions for splitting content into multiple pages)
+- As much as possible, functionality is provided by soft-coding via these base pages, i.e. user and Enkidu can change/adapt them on the fly
 - Can be used offline just for standard search and recall, saving notes, etc. I will use it both on phone and computer. sync challenge is resttricted to consolidating any work done offline.
 - Dreaming
-  - This is something that happens in down time: Enkidu works fairly randomly through the pages, improving organisation primarily with tags, identifying near duplicates etc. also searches to make relevant updates to the preference cards so just gets increasingly delightful results over time. Also provide missing Summaries and adjust Title if necessary
+  - This is something that happens in down time: Enkidu works fairly randomly through the pages, improving organisation primarily with tags, identifying near duplicates etc. also searches to make relevant updates to preference base pages so just gets increasingly delightful results over time. Also provide missing Summaries and adjust Title if necessary
   - Dreaming could use slower/cheaper API?
-  - Dreaming prompt instructions are another Card.
-  - When dreaming finished, add a page called a dream diary to summarise what was done, and if appropriate a preference Card called Tags Guide which explains the tagging system
+  - Dreaming prompt instructions are a base page (`dream-prompt`).
+  - When dreaming finished, add a page called a dream diary to summarise what was done, and if appropriate a base page called Tags Guide which explains the tagging system
   - 
 - Recall panel
   - A large editable field containing the markdown source of the page in edit mode, and html in read mode. Not yet sure UX wise how this is related to the last chat box, eg they could be shared between the two panels, ie the editable field is also the last message in the chat conversation,? Maybe it's best if they remain separate but by default mirror one another. But when user uses search etc to put other pages on focus, this is not mirrored in the chat box. Make a suggestion.
@@ -40,7 +41,7 @@ Enkidu
   - Additional file browser to upload and parse multiple pdfs, folders of markdowns etc and add them as multiple new pages with appropriate tag metadata . Plus ability to add single web URLs which can be similarly parsed, stripping navigation etc text
 -  Usage examples
   - User types a question into chat box 
-    - Related pages list almost immediately loads , just may already see a relevant result, if not, user can optionally click checkbox on some of the related pages to add these to the payload, then just clicks request button and question is submitted to ai with additional payload of user preference cards etc, . Choice of models to use. 
+    - Related pages list almost immediately loads , just may already see a relevant result, if not, user can optionally click checkbox on some of the related pages to add these to the payload, then just clicks request button and question is submitted to ai with additional payload of base pages etc, . Choice of models to use. 
     - Request is added as a page
     - Response returned and displayed and added as a page. Previous page id is added.
     - Conversation continues
@@ -61,56 +62,56 @@ Enkidu
 - **Auth**: single shared token `ENKIDU_ADMIN_TOKEN` (Bearer token on every `/api/*` call)
 - **Netlify Functions API** (see `netlify/functions/`)
   - `POST /api/chat`: calls Gemini + saves *each* user message and assistant reply as separate pages (same `thread_id`)
+    - **Context payload**: UI can select pages (checkboxes in Recall list) and send them as `context_page_ids` to be injected into the system instruction for that chat request
+    - **Soft-coded system + preferences**: system/prefs come from base pages (tags below); `dream-prompt` / `split-prompt` pages are *excluded* from normal chat injection
+    - **Optional page splitting**: if the assistant reply ends with `{\"enkidu_meta\":{...}}` containing `new_pages`, the backend creates those pages silently
   - `GET /api/pages`: list + substring search (`q`) + filters (`tag`, `thread_id`)
   - `POST /api/pages`: create page
   - `GET/PUT/DELETE /api/page?id=...`: fetch/update/delete a page
   - `GET /api/tags`: returns distinct tags (from recent pages)
   - `GET /api/models`: lists available Gemini models for your API key (ListModels)
   - `GET /api/threads`: lists recent chat threads (dropdown labels are latest timestamps, desc)
+  - `POST /api/dream`: manual Dream run (UI button) that updates some recent pages (titles/tags/kv_tags) per the `dream-prompt` base page, then writes a `dream-diary` page summarising changes
 - **Gemini model selection**
   - UI dropdown populated from `/api/models`
   - Default is `gemini-3-flash-preview` (when available)
 - **Secret blocking**: refuses to save content that looks like a secret (simple heuristics)
-- **Tag suggestions applied automatically**
+- **Base pages (soft-coded prompts/preferences)**
+  - All are just normal pages; behaviour is driven by tags:
+    - `system` (system prompt; most recent wins)
+    - `style`, `bio`, `strategy` (preference base pages; a few recent are concatenated)
+    - `dream-prompt` (dreaming instructions; used by `/api/dream`)
+    - `split-prompt` (reserved for future “split into pages” UX; currently excluded from normal chat injection)
+- **Tag suggestions applied automatically (assistant -> backend)**
   - If assistant replies end with `{\"enkidu_meta\":{...}}`, backend strips it from visible reply and applies:
     - `suggested_title` -> saved assistant page title
     - `suggested_tags` -> merged into saved assistant page tags (always includes `chat`)
     - `suggested_kv_tags` -> merged into saved assistant page kv_tags (forces `role: assistant`)
 - **UI (Bootstrap, single page)**
   - Chat panel with Enter-to-send (Shift+Enter newline), thread dropdown, model dropdown
+  - Recall list rows have a **payload checkbox** (selected pages are included in the next chat request)
   - Recall panel with search, list, edit markdown, preview, save/delete
-  - When recall search is empty, recall list auto-populates with “related pages” based on chatbox text (client-side token overlap)
+  - When recall search is empty, recall list auto-populates with “related pages” based on chatbox text (client-side token overlap), with presets: Mixed / Time only / Tags only / Text only
+  - Quick-create buttons for base pages: System / Style / Bio / Strategy / Dream prompt / Split prompt
 
 ## Open questions (decisions we have not made yet)
 
 - **Auth**: keep `ENKIDU_ADMIN_TOKEN`, or switch to simplest email/password auth (Supabase Auth)? !!LEAVE IT
 - **UI**: keep Bootstrap, or replace with a minimal custom light/dark theme? !!LEAVE IT
 - **Schema**: add `summary`, `prev_page_id`, !!YES reminders, and/or a links table? !!NOT YET
-- **Recall ranking**: what should the mixer be (time vs tags vs embeddings vs text similarity), and what presets? !!YES, make up some presets eg time only, tags only, text similarity only (we don't have embeds yet) and mixed.
-- **Dreaming**: when/how it runs, what it’s allowed to change, and what is logged in “dream diary”. !!YEs but atm just manual run on click button. diary just logs a summary of pages affected and overview of what was done
+- **Recall ranking**: current presets exist, but the scoring is still very rough (token overlap + tag overlap + slight recency). Decide if/when to change the weights/heuristics.
+- **Dreaming**: it’s manual (button) and writes a `dream-diary` page; decide the stable JSON output format for the dream model (updates + summary) and the allowed mutation scope (tags only vs titles vs kv_tags).
 - **Offline**: which features must work offline vs read-only vs none. !!NOT YET
 
 ## Next steps (practical increments)
 
-1. **Preference cards**: define a few stable kinds (e.g. `style`, `bio`, `strategy`) and a system prompt page format. !! DO IT
-2. **Recall “payload checkbox”**: allow selecting related pages to include in chat context explicitly. !! DO IT
-3. **Embeddings**: decide in-browser vs server, storage strategy, and rollout order (below). !! NOT YET
-
-## Next step: feasibility of in-browser embeddings
-
-Yes, **in-browser embeddings are feasible** for a “personal” scale, but there are tradeoffs.
-
-- **Feasible**:
-  - Use an in-browser embedding model (WASM/WebGPU) to embed `content_md` locally.
-  - Store vectors in **IndexedDB** for fast local similarity search (offline-capable).
-  - Good for “show related pages as you type” without server cost.
-- **Tradeoffs**:
-  - Initial download/compute cost (especially on mobile).
-  - Model quality is usually lower than server embeddings, but often “good enough” for recall.
-  - If you want cross-device sync of vectors, you’ll eventually want server-side storage (e.g. Supabase + `pgvector`), which implies a schema change.
-- **Suggested rollout** (minimal + reversible):
-  - Start **client-only embeddings** + IndexedDB for recall similarity.
-  - Keep server schema unchanged for now; later decide if/when to add `pgvector` for sync/search at scale.
+1. **Base pages (formalise)**: define the stable tags + minimal templates for `system`, `style`, `bio`, `strategy`, `dream-prompt`, `split-prompt` (what each should contain, and what it is allowed to do).
+2. **Dreaming prompt content**: write a good `dream-prompt` base page so Dreaming produces reliable JSON updates and a useful diary summary.
+3. **Split prompt UX**: decide how you want to invoke “split into pages” (button? chat instruction?), and wire it to actually use the `split-prompt` base page.
+4. **Embeddings (server-side pgvector)**: implemented. On every page create/update, the backend generates a Gemini embedding and stores it in `public.pages.embedding` (pgvector).
+   - Schema: `supabase/schema.sql` enables `vector` and adds `embedding vector(768)` + `embedding_model` + `embedding_updated_at`.
+   - Backend: Netlify functions write embeddings on every insert/update that touches `public.pages`.
+   - Existing pages: run `POST /api/backfill-embeddings?limit=25` repeatedly until it reports fewer than `limit` updated.
 
 ## Requirements
 - Node.js 18+
@@ -122,6 +123,7 @@ Put these in `.env` (or real env vars). See `env.example`.
 - `SUPABASE_SERVICE_ROLE_KEY` (required; server-side only; use Supabase \"secret\" key)
 - `GEMINI_API_KEY` (required; server-side only)
 - `GEMINI_MODEL` (optional; default `gemini-3-flash-preview`)
+- `GEMINI_EMBED_MODEL` (optional; default `text-embedding-004`)
 
 
 ## Hosting (Netlify + Supabase) (git-push deploy)

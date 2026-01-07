@@ -5,8 +5,9 @@ const crypto = require("crypto");
 
 const { requireAdmin } = require("./_auth");
 const { supabaseRequest } = require("./_supabase");
-const { assertNoSecrets } = require("./_secrets");
+const { assertNoSecrets, isAllowSecrets } = require("./_secrets");
 const { geminiGenerate } = require("./_gemini");
+const { makeEmbeddingFieldsBatch } = require("./_embeddings");
 
 function json(statusCode, obj) {
   return {
@@ -184,7 +185,7 @@ async function loadContextPages(pageIds) {
   return (await supabaseRequest("pages", { query })) || [];
 }
 
-async function createPagesFromMeta(meta) {
+async function createPagesFromMeta(meta, { allowSecrets } = {}) {
   // Purpose: allow "split into pages" to happen silently via the JSON footer.
   //
   // Expected shape:
@@ -201,8 +202,8 @@ async function createPagesFromMeta(meta) {
     const kv_tags = p?.kv_tags && typeof p.kv_tags === "object" ? p.kv_tags : {};
 
     if (!content_md.trim()) continue;
-    if (title) assertNoSecrets(title);
-    assertNoSecrets(content_md);
+    if (title) assertNoSecrets(title, { allow: allowSecrets });
+    assertNoSecrets(content_md, { allow: allowSecrets });
 
     cleaned.push({
       title,
@@ -216,10 +217,16 @@ async function createPagesFromMeta(meta) {
 
   if (!cleaned.length) return [];
 
+  // Batch embed first (1 API call), then bulk insert with embeddings inline.
+  const embedFields = await makeEmbeddingFieldsBatch({
+    contents_md: cleaned.map((p) => p.content_md),
+  });
+  for (let i = 0; i < cleaned.length; i++) cleaned[i] = { ...cleaned[i], ...embedFields[i] };
+
   // Bulk insert (PostgREST accepts an array body).
   const rows = await supabaseRequest("pages", {
     method: "POST",
-    query: "?select=id,created_at,title,tags,kv_tags",
+    query: "?select=id",
     body: cleaned,
   });
 
@@ -235,6 +242,7 @@ exports.handler = async (event) => {
   }
 
   try {
+    const allowSecrets = isAllowSecrets(event);
     const body = JSON.parse(event.body || "{}");
     const message = String(body.message || "");
     let threadId = body.thread_id ? String(body.thread_id) : "";
@@ -242,7 +250,7 @@ exports.handler = async (event) => {
     const contextPageIds = body.context_page_ids || [];
 
     if (!message.trim()) return json(400, { error: "message is required" });
-    assertNoSecrets(message);
+    assertNoSecrets(message, { allow: allowSecrets });
 
     if (!threadId) threadId = crypto.randomUUID();
 
@@ -268,6 +276,9 @@ exports.handler = async (event) => {
     });
     const { cleaned: reply, meta } = extractEnkiduMeta(rawReply);
 
+    // Embed user+assistant messages in one batch to avoid timeouts.
+    const [userEmbed, asstEmbed] = await makeEmbeddingFieldsBatch({ contents_md: [message, reply] });
+
     // Save user message
     const userRows = await supabaseRequest("pages", {
       method: "POST",
@@ -279,12 +290,13 @@ exports.handler = async (event) => {
         tags: ["chat"],
         kv_tags: { role: "user" },
         next_page_id: null,
+        ...userEmbed,
       },
     });
     const userPageId = userRows?.[0]?.id || null;
 
     // Save assistant reply
-    assertNoSecrets(reply);
+    assertNoSecrets(reply, { allow: allowSecrets });
     const suggestedTags = Array.isArray(meta?.suggested_tags) ? meta.suggested_tags : [];
     const suggestedTitle =
       typeof meta?.suggested_title === "string" && meta.suggested_title.trim()
@@ -315,12 +327,13 @@ exports.handler = async (event) => {
         tags: assistantTags,
         kv_tags: assistantKv,
         next_page_id: null,
+        ...asstEmbed,
       },
     });
     const assistantPageId = asstRows?.[0]?.id || null;
 
     // Optional: split into additional pages silently via meta.new_pages
-    const createdPages = meta ? await createPagesFromMeta(meta) : [];
+    const createdPages = meta ? await createPagesFromMeta(meta, { allowSecrets }) : [];
 
     return json(200, {
       thread_id: threadId,
