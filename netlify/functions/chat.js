@@ -248,6 +248,7 @@ exports.handler = async (event) => {
     let threadId = body.thread_id ? String(body.thread_id) : "";
     const model = body.model ? String(body.model) : null;
     const contextPageIds = body.context_page_ids || [];
+    const useWebSearch = body.use_web_search === true;
 
     if (!message.trim()) return json(400, { error: "message is required" });
     assertNoSecrets(message, { allow: allowSecrets });
@@ -273,6 +274,7 @@ exports.handler = async (event) => {
       system,
       messages: [...history, { role: "user", text: message }],
       model,
+      ...(useWebSearch ? { tools: [{ google_search: {} }] } : {}),
     });
     const { cleaned: reply, meta } = extractEnkiduMeta(rawReply);
 

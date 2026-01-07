@@ -1,7 +1,28 @@
 .enkidu-scroll {
-  height: 60vh;
+  /* Purpose: scrollable panels; height is controlled by the container on mobile. */
+  max-height: 60vh;
   overflow: auto;
   white-space: pre-wrap;
+}
+
+/* Mobile: cap the Chat card height so Recall is visible underneath; chat log scrolls inside. */
+@media (max-width: 991.98px) {
+  .enkidu-chat-card {
+    height: 40vh;
+    height: 40dvh;
+  }
+}
+
+/* Purpose: make the chat log fill remaining space inside the capped card. */
+.enkidu-chat-card .card-body {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.enkidu-chat-card #chatLog {
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .enkidu-msg {

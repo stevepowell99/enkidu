@@ -30,14 +30,32 @@ exports.handler = async (event) => {
   try {
     const limit = parseLimit(event.queryStringParameters?.limit);
 
-    // Fetch a batch of pages missing embeddings.
-    const rows = await supabaseRequest("pages", {
-      query:
-        "?select=id,content_md" +
-        "&embedding=is.null" +
-        "&order=created_at.asc" +
-        `&limit=${encodeURIComponent(limit)}`,
-    });
+    const body = JSON.parse(event.body || "{}");
+    const reqIds = Array.isArray(body?.ids) ? body.ids.map(String) : [];
+    const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const safeIds = reqIds.filter((id) => uuidRe.test(id)).slice(0, limit);
+
+    let rows = [];
+    if (safeIds.length) {
+      // Backfill only these ids (used after split-into-pages).
+      const inList = safeIds.map((s) => encodeURIComponent(s)).join(",");
+      rows = await supabaseRequest("pages", {
+        query:
+          `?select=id,content_md` +
+          `&id=in.(${inList})` +
+          `&embedding=is.null` +
+          `&limit=${encodeURIComponent(safeIds.length)}`,
+      });
+    } else {
+      // Fetch a batch of pages missing embeddings (oldest first).
+      rows = await supabaseRequest("pages", {
+        query:
+          "?select=id,content_md" +
+          "&embedding=is.null" +
+          "&order=created_at.asc" +
+          `&limit=${encodeURIComponent(limit)}`,
+      });
+    }
 
     let updated = 0;
     const ids = [];

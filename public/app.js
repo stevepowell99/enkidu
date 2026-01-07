@@ -3,6 +3,7 @@
 
 const LS_TOKEN_KEY = "enkidu_admin_token";
 const LS_ALLOW_SECRETS_KEY = "enkidu_allow_secrets";
+const LS_USE_WEB_SEARCH_KEY = "enkidu_use_web_search";
 const DEFAULT_MODEL_ID = "gemini-3-flash-preview";
 
 function $(id) {
@@ -24,11 +25,21 @@ function setToken(token) {
 }
 
 function getAllowSecrets() {
-  return localStorage.getItem(LS_ALLOW_SECRETS_KEY) === "1";
+  // Purpose: default OFF on each new browser session (do not persist across sessions).
+  return sessionStorage.getItem(LS_ALLOW_SECRETS_KEY) === "1";
 }
 
 function setAllowSecrets(on) {
-  localStorage.setItem(LS_ALLOW_SECRETS_KEY, on ? "1" : "0");
+  sessionStorage.setItem(LS_ALLOW_SECRETS_KEY, on ? "1" : "0");
+}
+
+function getUseWebSearch() {
+  // Purpose: default OFF on each new browser session (do not persist across sessions).
+  return sessionStorage.getItem(LS_USE_WEB_SEARCH_KEY) === "1";
+}
+
+function setUseWebSearch(on) {
+  sessionStorage.setItem(LS_USE_WEB_SEARCH_KEY, on ? "1" : "0");
 }
 
 async function apiFetch(path, { method = "GET", body } = {}) {
@@ -118,7 +129,39 @@ function parseTags(raw) {
 let recentPagesCache = null; // loaded lazily (array of pages)
 let relatedDebounce = null;
 const selectedPayloadIds = new Set(); // pages selected to include in next chat request
-let relatedMode = "heuristic"; // "heuristic" (default) | "embeddings" (on-demand)
+
+function getRelatedPreset() {
+  // Purpose: read the Related preset from the radio button group (default "mixed").
+  return document.querySelector('input[name="relatedPreset"]:checked')?.value || "mixed";
+}
+
+function isRecallSearchActive() {
+  // Purpose: if any recall search field is non-empty, we are in "search" mode (not "related").
+  const q = ($("recallQuery")?.value || "").trim();
+  const tag = ($("recallTag")?.value || "").trim();
+  const kvKey = ($("recallKvKey")?.value || "").trim();
+  const kvValue = ($("recallKvValue")?.value || "").trim();
+  return !!(q || tag || kvKey || kvValue);
+}
+
+function getVisibleRecallIds() {
+  // Purpose: read the currently visible Related/Recall list (checkboxes).
+  const root = $("recallResults");
+  if (!root) return [];
+  return Array.from(root.querySelectorAll('input[type="checkbox"][data-page-id]'))
+    .map((el) => el.dataset.pageId)
+    .filter(Boolean);
+}
+
+function updateRelatedToggleLabel() {
+  // Purpose: keep the Select/Unselect All toggle in sync with the visible list + selected state.
+  const btn = $("toggleRelatedAll");
+  if (!btn) return;
+  const ids = getVisibleRecallIds();
+  btn.disabled = ids.length === 0;
+  const allSelected = ids.length > 0 && ids.every((id) => selectedPayloadIds.has(id));
+  btn.textContent = allSelected ? "Unselect all" : "Select all";
+}
 
 function updateTagSuggestionsFromPages(pages, { limit = 15 } = {}) {
   // Purpose: suggest common tags in the Tag filter box.
@@ -223,11 +266,13 @@ function renderRecallResults(pages) {
 
     const cb = document.createElement("input");
     cb.type = "checkbox";
+    cb.dataset.pageId = p.id;
     cb.checked = selectedPayloadIds.has(p.id);
     cb.onchange = () => {
       if (cb.checked) selectedPayloadIds.add(p.id);
       else selectedPayloadIds.delete(p.id);
       updatePayloadCount();
+      updateRelatedToggleLabel();
     };
 
     const btn = document.createElement("button");
@@ -252,6 +297,8 @@ function renderRecallResults(pages) {
     row.appendChild(btn);
     root.appendChild(row);
   }
+
+  updateRelatedToggleLabel();
 }
 
 async function recallSearch() {
@@ -280,13 +327,12 @@ async function recallSearch() {
 
   // Otherwise: "related pages" mode based on current chatbox text.
   const chatText = ($("chatInput").value || "").trim();
-  const preset = $("relatedPreset").value || "mixed";
+  const preset = getRelatedPreset();
 
   setStatus("Loading related pages...", "secondary");
 
   // If there is no chat text yet, just show recent assistant chat pages.
   if (!chatText) {
-    relatedMode = "heuristic"; // reset after empty input
     const pages = await ensureRecentPagesCache();
     const candidates = pages.filter(
       (p) => (p?.kv_tags?.role === "assistant" || p?.kv_tags?.role === "user") && (p?.tags || []).includes("chat")
@@ -297,13 +343,10 @@ async function recallSearch() {
     return;
   }
 
-  // Embeddings mode is on-demand (button), to avoid costs/timeouts while typing.
-  if (relatedMode === "embeddings") {
-    const data = await apiFetch(`/api/pages?limit=50&related_to=${encodeURIComponent(chatText)}`);
-    renderRecallResults(data.pages);
-    setStatus(`Related: showing ${data.pages?.length || 0} most similar pages (embeddings).`, "success");
-    relatedMode = "heuristic"; // one-shot
-    return;
+  async function loadEmbeddingsRelated(limit = 50) {
+    // Purpose: server-side semantic similarity using pgvector.
+    const data = await apiFetch(`/api/pages?limit=${encodeURIComponent(limit)}&related_to=${encodeURIComponent(chatText)}`);
+    return data.pages || [];
   }
 
   const queryTokens = tokenize(chatText).slice(0, 40);
@@ -343,9 +386,26 @@ async function recallSearch() {
     .filter((x) => x.score > 0 || preset === "time")
     .sort((a, b) => b.score - a.score);
 
-  const top = scored.slice(0, 50).map((x) => x.p);
-  renderRecallResults(top);
-  setStatus(`Related: showing ${top.length} similar pages.`, "success");
+  const topHeuristic = scored.slice(0, 50).map((x) => x.p);
+
+  if (preset === "embeddings") {
+    const emb = await loadEmbeddingsRelated(50);
+    renderRecallResults(emb);
+    setStatus(`Related: showing ${emb.length} most similar pages (embeddings).`, "success");
+    return;
+  }
+
+  if (preset === "mixed") {
+    const emb = await loadEmbeddingsRelated(25);
+    const embIds = new Set(emb.map((p) => p.id));
+    const merged = [...emb, ...topHeuristic.filter((p) => !embIds.has(p.id))].slice(0, 50);
+    renderRecallResults(merged);
+    setStatus(`Related: showing ${merged.length} pages (mixed).`, "success");
+    return;
+  }
+
+  renderRecallResults(topHeuristic);
+  setStatus(`Related: showing ${topHeuristic.length} similar pages.`, "success");
 }
 
 async function savePage() {
@@ -387,12 +447,26 @@ async function savePage() {
 }
 
 async function deletePage() {
-  if (!selectedPageId) return;
-  if (!confirm("Delete this page?")) return;
+  // Purpose: delete the currently selected page AND any pages checked in Related/Recall.
+  const ids = new Set();
+  if (selectedPageId) ids.add(selectedPageId);
+  for (const id of selectedPayloadIds) ids.add(id);
+  if (!ids.size) return;
+
+  const msg = ids.size === 1 ? "Delete this page?" : `Delete these ${ids.size} pages?`;
+  if (!confirm(msg)) return;
 
   setStatus("Deleting...", "secondary");
-  await apiFetch(`/api/page?id=${encodeURIComponent(selectedPageId)}`, { method: "DELETE" });
+
+  // NOTE: backend only supports deleting one page per request; keep it simple and sequential.
+  for (const id of ids) {
+    await apiFetch(`/api/page?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+    selectedPayloadIds.delete(id); // keep payload selection consistent with reality
+  }
+
+  updatePayloadCount();
   setSelectedPage(null);
+  recentPagesCache = null; // drop client cache so "Related" doesn't show deleted pages
   setStatus("Deleted.", "success");
   await recallSearch();
 }
@@ -451,11 +525,21 @@ async function sendChat() {
   setStatus("Sending...", "secondary");
 
   const model = $("chatModel").value || null;
+  const use_web_search = !!$("useWebSearch")?.checked;
   const context_page_ids = Array.from(selectedPayloadIds);
   const data = await apiFetch("/api/chat", {
     method: "POST",
-    body: { message: msg, thread_id: threadId || null, model, context_page_ids },
+    body: { message: msg, thread_id: threadId || null, model, context_page_ids, use_web_search },
   });
+
+  // If the assistant created split pages, backfill embeddings in a separate call
+  // so chat doesn’t block on N embedding requests (avoids Netlify dev 30s timeout).
+  if (Array.isArray(data?.created_pages) && data.created_pages.length) {
+    apiFetch("/api/backfill-embeddings?limit=200", {
+      method: "POST",
+      body: { ids: data.created_pages },
+    }).catch(() => {});
+  }
 
   await loadThreads(data.thread_id);
   await reloadThread();
@@ -476,6 +560,7 @@ function init() {
   $("adminToken").value = getToken();
   updatePayloadCount();
   if ($("allowSecrets")) $("allowSecrets").checked = getAllowSecrets();
+  if ($("useWebSearch")) $("useWebSearch").checked = getUseWebSearch();
 
   $("saveToken").onclick = () => {
     setToken(($("adminToken").value || "").trim());
@@ -487,12 +572,33 @@ function init() {
   $("allowSecrets")?.addEventListener("change", () => {
     setAllowSecrets(!!$("allowSecrets").checked);
   });
+  $("useWebSearch")?.addEventListener("change", () => {
+    setUseWebSearch(!!$("useWebSearch").checked);
+  });
+  $("toggleRelatedAll")?.addEventListener("click", () => {
+    const ids = getVisibleRecallIds();
+    if (!ids.length) return;
+    const allSelected = ids.every((id) => selectedPayloadIds.has(id));
+    for (const id of ids) {
+      if (allSelected) selectedPayloadIds.delete(id);
+      else selectedPayloadIds.add(id);
+    }
+    // Update the visible checkboxes immediately (no re-search).
+    const root = $("recallResults");
+    for (const cb of root.querySelectorAll('input[type="checkbox"][data-page-id]')) {
+      cb.checked = !allSelected;
+    }
+    updatePayloadCount();
+    updateRelatedToggleLabel();
+  });
 
   $("recallSearch").onclick = () => recallSearch().catch((e) => setStatus(e.message, "danger"));
-  $("relatedPreset").addEventListener("change", () => {
-    if (($("recallQuery").value || "").trim() || ($("recallTag").value || "").trim()) return;
-    recallSearch().catch(() => {});
-  });
+  for (const el of document.querySelectorAll('input[name="relatedPreset"]')) {
+    el.addEventListener("change", () => {
+      if (isRecallSearchActive()) return;
+      recallSearch().catch(() => {});
+    });
+  }
   $("recallQuery").addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
       e.preventDefault();
@@ -549,17 +655,12 @@ function init() {
   });
   $("chatInput").addEventListener("input", () => {
     // While recallQuery is empty, keep the related pages list synced to chat input.
-    if (($("recallQuery").value || "").trim()) return;
+    if (isRecallSearchActive()) return;
     if (relatedDebounce) clearTimeout(relatedDebounce);
     relatedDebounce = setTimeout(() => {
       recallSearch().catch(() => {});
     }, 800);
   });
-  $("findSimilar").onclick = () => {
-    // Purpose: on-demand embeddings-based similarity (avoids constant embedding calls while typing).
-    relatedMode = "embeddings";
-    recallSearch().catch((e) => setStatus(e.message, "danger"));
-  };
   $("reloadChat").onclick = () => reloadThread().catch((e) => setStatus(e.message, "danger"));
   $("newThread").onclick = () => newThread();
   $("threadSelect").addEventListener("change", () => {
@@ -568,6 +669,7 @@ function init() {
   $("clearPayload").onclick = () => {
     selectedPayloadIds.clear();
     updatePayloadCount();
+    updateRelatedToggleLabel();
     recallSearch().catch(() => {});
   };
   $("runDream").onclick = () => runDream().catch((e) => setStatus(e.message, "danger"));

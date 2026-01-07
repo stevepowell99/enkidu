@@ -65,6 +65,7 @@ Enkidu
     - **Context payload**: UI can select pages (checkboxes in Recall list) and send them as `context_page_ids` to be injected into the system instruction for that chat request
     - **Soft-coded system + preferences**: system/prefs come from base pages (tags below); `dream-prompt` / `split-prompt` pages are *excluded* from normal chat injection
     - **Optional page splitting**: if the assistant reply ends with `{\"enkidu_meta\":{...}}` containing `new_pages`, the backend creates those pages silently
+    - **Optional web search grounding**: UI toggle “Web search” sends `use_web_search: true` to enable Gemini’s `google_search` tool (when supported by your API key/model)
   - `GET /api/pages`: list + substring search (`q`) + filters (`tag`, `thread_id`)
   - `POST /api/pages`: create page
   - `GET/PUT/DELETE /api/page?id=...`: fetch/update/delete a page

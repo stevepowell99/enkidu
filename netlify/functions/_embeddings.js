@@ -2,7 +2,7 @@
 // Purpose: keep embedding generation/storage logic in one place and call it on every page write.
 
 const { supabaseRequest } = require("./_supabase");
-const { geminiEmbed, geminiBatchEmbed } = require("./_gemini");
+const { geminiEmbed } = require("./_gemini");
 
 function truncateForEmbedding(text, { maxChars = 8000 } = {}) {
   // Purpose: keep embedding latency predictable (prevents timeouts on long markdown).
@@ -34,7 +34,8 @@ async function makeEmbeddingFields({ content_md }) {
 }
 
 async function makeEmbeddingFieldsBatch({ contents_md }) {
-  // Purpose: embed many pages in one API call (critical for multi-page create).
+  // Purpose: embed many pages. Keep it simple: call embedContent per item.
+  // (BatchEmbedContents has been unreliable across models/APIs.)
   const texts = Array.isArray(contents_md) ? contents_md.map((t) => truncateForEmbedding(t)) : [];
   const nonEmpty = texts.map((t) => t || "");
 
@@ -44,21 +45,19 @@ async function makeEmbeddingFieldsBatch({ contents_md }) {
     throw new Error("Batch embedding requires non-empty content_md for every item");
   }
 
-  const { model, embeddings } = await geminiBatchEmbed({
-    texts: nonEmpty,
-    taskType: "RETRIEVAL_DOCUMENT",
-  });
-
-  if (embeddings.length !== nonEmpty.length) {
-    throw new Error(`Gemini batch embed error: expected ${nonEmpty.length} embeddings, got ${embeddings.length}`);
-  }
-
   const now = new Date().toISOString();
-  return embeddings.map((values) => ({
-    embedding: toPgvectorLiteral(values),
-    embedding_model: model,
-    embedding_updated_at: now,
-  }));
+  const results = await Promise.all(
+    nonEmpty.map(async (text) => {
+      const { model, values } = await geminiEmbed({ text, taskType: "RETRIEVAL_DOCUMENT" });
+      return {
+        embedding: toPgvectorLiteral(values),
+        embedding_model: model,
+        embedding_updated_at: now,
+      };
+    })
+  );
+
+  return results;
 }
 
 async function updatePageEmbedding({ id, content_md }) {

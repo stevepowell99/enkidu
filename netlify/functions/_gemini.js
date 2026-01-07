@@ -16,7 +16,7 @@ function normalizeModelName(model) {
   return m.startsWith("models/") ? m.slice("models/".length) : m;
 }
 
-async function geminiGenerate({ system, messages, model }) {
+async function geminiGenerate({ system, messages, model, tools } = {}) {
   const cfg = getGeminiConfig();
   const apiKey = cfg.apiKey;
   const modelName = normalizeModelName(model || cfg.model);
@@ -35,6 +35,7 @@ async function geminiGenerate({ system, messages, model }) {
       role: m.role, // "user" | "model"
       parts: [{ text: String(m.text) }],
     })),
+    ...(Array.isArray(tools) && tools.length ? { tools } : {}),
   };
 
   const res = await fetch(url, {
@@ -99,9 +100,10 @@ async function geminiBatchEmbed({ texts, model, taskType = "RETRIEVAL_DOCUMENT" 
   if (!items.length) return { model: modelName, embeddings: [] };
 
   // AI Studio Gemini API (Generative Language API)
+  // NOTE: This method is exposed as `models/{model}:batchEmbedContents` for API-key usage.
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
     modelName
-  )}:batchEmbedContent?key=${encodeURIComponent(apiKey)}`;
+  )}:batchEmbedContents?key=${encodeURIComponent(apiKey)}`;
 
   const body = {
     requests: items.map((text) => ({
@@ -119,7 +121,7 @@ async function geminiBatchEmbed({ texts, model, taskType = "RETRIEVAL_DOCUMENT" 
   const json = await res.json().catch(() => null);
   if (!res.ok) {
     const msg = json ? JSON.stringify(json) : `${res.status} ${res.statusText}`;
-    throw new Error(`Gemini batch embed error: ${msg}`);
+    throw new Error(`Gemini batch embed error (model=${modelName}): ${msg}`);
   }
 
   const embeddings = json?.embeddings;
