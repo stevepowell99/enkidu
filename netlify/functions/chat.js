@@ -226,7 +226,7 @@ async function createPagesFromMeta(meta, { allowSecrets } = {}) {
   // Bulk insert (PostgREST accepts an array body).
   const rows = await supabaseRequest("pages", {
     method: "POST",
-    query: "?select=id",
+    query: "?select=id,title",
     body: cleaned,
   });
 
@@ -278,6 +278,8 @@ exports.handler = async (event) => {
     });
     const { cleaned: reply, meta } = extractEnkiduMeta(rawReply);
 
+    // Optional: split into additional pages silently via meta.new_pages.
+    const createdPages = meta ? await createPagesFromMeta(meta, { allowSecrets }) : [];
     // Embed user+assistant messages in one batch to avoid timeouts.
     const [userEmbed, asstEmbed] = await makeEmbeddingFieldsBatch({ contents_md: [message, reply] });
 
@@ -333,9 +335,6 @@ exports.handler = async (event) => {
       },
     });
     const assistantPageId = asstRows?.[0]?.id || null;
-
-    // Optional: split into additional pages silently via meta.new_pages
-    const createdPages = meta ? await createPagesFromMeta(meta, { allowSecrets }) : [];
 
     return json(200, {
       thread_id: threadId,

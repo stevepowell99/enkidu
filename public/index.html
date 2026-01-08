@@ -78,6 +78,12 @@
                 <textarea id="chatInput" class="form-control" rows="2" placeholder="Message..."></textarea>
                 <button id="sendChat" class="btn btn-primary" type="button">Send</button>
               </div>
+              <div class="form-check form-switch mt-2">
+                <input class="form-check-input" type="checkbox" role="switch" id="liveRelated" />
+                <label class="form-check-label small" for="liveRelated" title="When on, typing updates the Related list (debounced)">
+                  Live Related
+                </label>
+              </div>
               <div class="mt-2 d-flex gap-2">
                 <button id="reloadChat" class="btn btn-sm btn-outline-secondary" type="button">Reload thread</button>
                 <button id="newThread" class="btn btn-sm btn-outline-secondary" type="button">New thread</button>
@@ -92,40 +98,35 @@
             <div class="card-header d-flex gap-2 align-items-center">
               <div class="fw-semibold">Recall</div>
               <div class="ms-auto d-flex gap-2 align-items-center">
-                <div class="btn-group btn-group-sm" role="group" aria-label="Related preset" id="relatedPresetGroup">
-                  <input type="radio" class="btn-check" name="relatedPreset" id="relatedPresetMixed" value="mixed" autocomplete="off" checked />
-                  <label class="btn btn-outline-secondary" for="relatedPresetMixed" title="Mixed: embeddings + tags + text overlap + recency">
-                    <i class="bi bi-sliders"></i>
+                <div class="btn-group btn-group-sm" role="group" aria-label="Related matchers" id="relatedMatcherGroup">
+                  <input type="checkbox" class="btn-check" id="matchTime" autocomplete="off" checked />
+                  <label class="btn btn-outline-secondary" for="matchTime" title="Time: most recent pages first">
+                    <i class="bi bi-clock-history"></i>
                   </label>
 
-                  <input type="radio" class="btn-check" name="relatedPreset" id="relatedPresetEmbeddings" value="embeddings" autocomplete="off" />
-                  <label class="btn btn-outline-secondary" for="relatedPresetEmbeddings" title="Embeddings: server-side semantic similarity">
-                    <i class="bi bi-stars"></i>
-                  </label>
-
-                  <input type="radio" class="btn-check" name="relatedPreset" id="relatedPresetText" value="text" autocomplete="off" />
-                  <label class="btn btn-outline-secondary" for="relatedPresetText" title="Text: word overlap with your current draft message">
+                  <input type="checkbox" class="btn-check" id="matchText" autocomplete="off" checked />
+                  <label class="btn btn-outline-secondary" for="matchText" title="Text: word overlap with your current draft message">
                     <i class="bi bi-fonts"></i>
                   </label>
 
-                  <input type="radio" class="btn-check" name="relatedPreset" id="relatedPresetTags" value="tags" autocomplete="off" />
-                  <label class="btn btn-outline-secondary" for="relatedPresetTags" title="Tags: overlap between your words and page tags">
-                    <i class="bi bi-tags"></i>
+                  <input type="checkbox" class="btn-check" id="matchTitle" autocomplete="off" />
+                  <label class="btn btn-outline-secondary" for="matchTitle" title="Title: word overlap with page titles">
+                    <i class="bi bi-card-text"></i>
                   </label>
 
-                  <input type="radio" class="btn-check" name="relatedPreset" id="relatedPresetTime" value="time" autocomplete="off" />
-                  <label class="btn btn-outline-secondary" for="relatedPresetTime" title="Time: most recent pages first">
-                    <i class="bi bi-clock-history"></i>
+                  <input type="checkbox" class="btn-check" id="matchEmbeddings" autocomplete="off" checked />
+                  <label class="btn btn-outline-secondary" for="matchEmbeddings" title="Embeddings: server-side semantic similarity">
+                    <i class="bi bi-stars"></i>
                   </label>
                 </div>
               </div>
             </div>
             <div class="card-body">
               <div class="input-group mb-2">
-                <input id="recallQuery" class="form-control" placeholder="Search (substring)..." />
                 <input id="recallTag" class="form-control" placeholder="Tag filter (single tag)..." list="tagSuggestions" />
                 <datalist id="tagSuggestions"></datalist>
-                <input id="recallKvKey" class="form-control" placeholder="KV key (e.g. role)" />
+                <input id="recallKvKey" class="form-control" placeholder="KV key (e.g. role)" list="kvKeySuggestions" />
+                <datalist id="kvKeySuggestions"></datalist>
                 <input id="recallKvValue" class="form-control" placeholder="KV value (e.g. assistant)" />
                 <button id="recallSearch" class="btn btn-outline-primary" type="button">Search</button>
               </div>
@@ -144,24 +145,6 @@
                     <button id="newPage" class="btn btn-sm btn-outline-secondary" type="button" title="New page" aria-label="New page">
                       <i class="bi bi-file-earmark-plus"></i>
                     </button>
-                    <button id="newSystemCard" class="btn btn-sm btn-outline-secondary" type="button" title="New system base page" aria-label="New system base page">
-                      <i class="bi bi-gear"></i>
-                    </button>
-                    <button id="newStyleCard" class="btn btn-sm btn-outline-secondary" type="button" title="New style base page" aria-label="New style base page">
-                      <i class="bi bi-brush"></i>
-                    </button>
-                    <button id="newBioCard" class="btn btn-sm btn-outline-secondary" type="button" title="New bio base page" aria-label="New bio base page">
-                      <i class="bi bi-person"></i>
-                    </button>
-                    <button id="newStrategyCard" class="btn btn-sm btn-outline-secondary" type="button" title="New strategy base page" aria-label="New strategy base page">
-                      <i class="bi bi-diagram-3"></i>
-                    </button>
-                    <button id="newDreamCard" class="btn btn-sm btn-outline-secondary" type="button" title="New dream base page" aria-label="New dream base page">
-                      <i class="bi bi-moon-stars"></i>
-                    </button>
-                    <button id="newSplitCard" class="btn btn-sm btn-outline-secondary" type="button" title="New split base page" aria-label="New split base page">
-                      <i class="bi bi-scissors"></i>
-                    </button>
                     <button id="savePage" class="btn btn-sm btn-primary" type="button" title="Save" aria-label="Save">
                       <i class="bi bi-save"></i>
                     </button>
@@ -177,7 +160,18 @@
 
                   <div class="mb-2">
                     <label class="form-label small mb-1" for="pageTags">Tags (comma-separated)</label>
-                    <input id="pageTags" class="form-control form-control-sm" placeholder="e.g. style, preference" />
+                    <div class="input-group input-group-sm">
+                      <input id="pageTags" class="form-control" placeholder="e.g. style, preference" />
+                      <select id="pageTagPreset" class="form-select w-auto" style="max-width: 12rem" title="Add preset tags">
+                        <option value="">(add preset tags…)</option>
+                        <option value="system,preference">System base page</option>
+                        <option value="style,preference">Style base page</option>
+                        <option value="bio,preference">Bio base page</option>
+                        <option value="strategy,preference">Strategy base page</option>
+                        <option value="dream-prompt,preference">Dream base page</option>
+                        <option value="split-prompt,preference">Split base page</option>
+                      </select>
+                    </div>
                   </div>
 
                   <div class="mb-2">
@@ -210,6 +204,22 @@
         </div>
       </div>
     </main>
+
+    <!-- Wikilink picker (Obsidian-style [[Title]] insert) -->
+    <div
+      id="wikilinkPicker"
+      class="card shadow-sm"
+      style="display:none; position:fixed; z-index:2000; width: 28rem;"
+      aria-label="Wikilink picker"
+    >
+      <div class="card-body p-2">
+        <div class="d-flex align-items-center gap-2 mb-1">
+          <div class="small text-secondary">Link to page</div>
+          <div class="ms-auto small text-secondary font-monospace" id="wikilinkPickerQuery"></div>
+        </div>
+        <div id="wikilinkPickerList" class="list-group list-group-flush"></div>
+      </div>
+    </div>
 
     <script src="/app.js"></script>
   </body>

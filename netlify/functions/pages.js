@@ -10,7 +10,8 @@ const { makeEmbeddingFields } = require("./_embeddings");
 function parseLimit(raw) {
   const n = Number(raw);
   if (!Number.isFinite(n) || n <= 0) return 50;
-  return Math.min(200, Math.floor(n));
+  // Allow larger reads for client-side features like wikilink picking (still keep a hard cap).
+  return Math.min(2000, Math.floor(n));
 }
 
 exports.handler = async (event) => {
@@ -30,7 +31,8 @@ exports.handler = async (event) => {
       // Vector-related pages (server-side embeddings).
       // Used by the UI when recall search is empty and the user is typing in chat.
       if (relatedTo && String(relatedTo).trim()) {
-        const embed = await makeEmbeddingFields({ content_md: String(relatedTo) });
+        // IMPORTANT: embed the query as a QUERY (not a DOCUMENT), otherwise results skew badly.
+        const embed = await makeEmbeddingFields({ content_md: String(relatedTo), taskType: "RETRIEVAL_QUERY" });
         if (!embed?.embedding) return { statusCode: 500, body: "Failed to embed related_to" };
 
         const rows = await supabaseRequest("rpc/match_pages", {

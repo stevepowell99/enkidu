@@ -4,10 +4,137 @@
 const LS_TOKEN_KEY = "enkidu_admin_token";
 const LS_ALLOW_SECRETS_KEY = "enkidu_allow_secrets";
 const LS_USE_WEB_SEARCH_KEY = "enkidu_use_web_search";
+const LS_LIVE_RELATED_KEY = "enkidu_live_related";
 const DEFAULT_MODEL_ID = "gemini-3-flash-preview";
+
+// Debug logging (enable per session in DevTools console):
+//   sessionStorage.setItem("enkidu_debug", "1"); location.reload();
+// Disable:
+//   sessionStorage.removeItem("enkidu_debug"); location.reload();
+const DEBUG = sessionStorage.getItem("enkidu_debug") === "1";
+function dbg(...args) {
+  if (!DEBUG) return;
+  console.debug("[enkidu]", ...args);
+}
 
 function $(id) {
   return document.getElementById(id);
+}
+
+async function openPageById(pageId) {
+  // Purpose: load a page into the Recall editor by ID (used by Recall list + chat links).
+  try {
+    setStatus("Loading page...", "secondary");
+    const one = await apiFetch(`/api/page?id=${encodeURIComponent(String(pageId || ""))}`);
+    setSelectedPage(one.page);
+    setStatus("Page loaded.", "success");
+  } catch (e) {
+    setStatus(String(e.message || e), "danger");
+  }
+}
+
+// NOTE: keep link handling simple; no special hash routing.
+
+// -------------------------
+// Clear ("X") buttons for text entry boxes
+// -------------------------
+
+function isTextEntryControl(el) {
+  // Purpose: detect controls where an inline clear button makes sense.
+  if (!el) return false;
+  const tag = String(el.tagName || "").toLowerCase();
+  if (tag === "textarea") return true;
+  if (tag !== "input") return false;
+
+  const type = String(el.getAttribute("type") || "text").toLowerCase();
+  if (["checkbox", "radio", "button", "submit", "reset", "file", "range", "color"].includes(type)) return false;
+  if (el.classList?.contains("btn-check")) return false; // Bootstrap toggle buttons
+  return true; // text, password, search, email, etc.
+}
+
+function dispatchInputEvents(el) {
+  // Purpose: keep existing UI wiring working (debounced recall, etc).
+  el.dispatchEvent(new Event("input", { bubbles: true }));
+  el.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
+function makeClearButton({ inline }) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.setAttribute("aria-label", "Clear");
+
+  if (inline) {
+    btn.className = "btn btn-outline-secondary btn-sm enkidu-clear-btn-inline d-none";
+    btn.innerHTML = '<i class="bi bi-x-lg" aria-hidden="true"></i>';
+  } else {
+    btn.className = "btn-close enkidu-clear-btn-absolute d-none";
+  }
+
+  return btn;
+}
+
+function attachClearButton(el) {
+  // Purpose: add an X to clear the control, without rewriting HTML templates everywhere.
+  if (!isTextEntryControl(el)) return;
+  if (el.dataset.enkiduClearApplied === "1") return;
+  el.dataset.enkiduClearApplied = "1";
+
+  const inInputGroup = !!el.closest(".input-group");
+  const btn = makeClearButton({ inline: inInputGroup });
+
+  function refresh() {
+    const hasValue = !!String(el.value || "").length;
+    btn.classList.toggle("d-none", !hasValue);
+  }
+
+  btn.addEventListener("click", () => {
+    if (!String(el.value || "").length) return;
+    el.value = "";
+    dispatchInputEvents(el);
+    el.focus();
+    refresh();
+  });
+
+  el.addEventListener("input", refresh);
+  el.addEventListener("change", refresh);
+
+  if (inInputGroup) {
+    // Input-group: add a compact button right after the control.
+    el.insertAdjacentElement("afterend", btn);
+    // Make sure the X is vertically aligned with textareas too.
+    btn.classList.add("align-self-start");
+  } else {
+    // Standalone control: wrap in a positioned container and overlay the X.
+    const wrap = document.createElement("div");
+    wrap.className = "enkidu-clear-wrap";
+    if (String(el.tagName || "").toLowerCase() === "textarea") wrap.classList.add("enkidu-clear-wrap-textarea");
+
+    el.parentNode.insertBefore(wrap, el);
+    wrap.appendChild(el);
+    wrap.appendChild(btn);
+
+    // Reserve space for the X so it doesn't cover text.
+    el.classList.add("pe-5");
+  }
+
+  refresh();
+}
+
+function initClearButtons() {
+  // Purpose: apply clear buttons to all current text entry boxes on the page.
+  const els = Array.from(document.querySelectorAll("input, textarea"));
+  for (const el of els) attachClearButton(el);
+}
+
+function refreshClearButtons() {
+  // Purpose: when code programmatically changes field values, keep X visibility correct.
+  for (const el of document.querySelectorAll('[data-enkidu-clear-applied="1"]')) {
+    const inInputGroup = !!el.closest(".input-group");
+    const btn = inInputGroup ? el.nextElementSibling : el.parentElement?.querySelector(".enkidu-clear-btn-absolute");
+    if (!btn) continue;
+    const hasValue = !!String(el.value || "").length;
+    btn.classList.toggle("d-none", !hasValue);
+  }
 }
 
 function setStatus(text, kind = "secondary") {
@@ -40,6 +167,15 @@ function getUseWebSearch() {
 
 function setUseWebSearch(on) {
   sessionStorage.setItem(LS_USE_WEB_SEARCH_KEY, on ? "1" : "0");
+}
+
+function getLiveRelated() {
+  // Purpose: default OFF on each new browser session (do not persist across sessions).
+  return sessionStorage.getItem(LS_LIVE_RELATED_KEY) === "1";
+}
+
+function setLiveRelated(on) {
+  sessionStorage.setItem(LS_LIVE_RELATED_KEY, on ? "1" : "0");
 }
 
 async function apiFetch(path, { method = "GET", body } = {}) {
@@ -129,19 +265,252 @@ function parseTags(raw) {
 let recentPagesCache = null; // loaded lazily (array of pages)
 let relatedDebounce = null;
 const selectedPayloadIds = new Set(); // pages selected to include in next chat request
+let relatedRequestSeq = 0; // increments per related recompute (used to ignore stale async results)
+let kvTagStats = null; // computed from recent pages: key -> { topValue, counts(Map) }
 
-function getRelatedPreset() {
-  // Purpose: read the Related preset from the radio button group (default "mixed").
-  return document.querySelector('input[name="relatedPreset"]:checked')?.value || "mixed";
+// -------------------------
+// Wikilinks (Obsidian-style [[Title]])
+// -------------------------
+
+let wikilinkPicker = null; // { open, targetId, startIdx, activeIdx, items }
+
+function escapeHtml(s) {
+  return String(s || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function preprocessWikilinks(md) {
+  // Purpose: turn [[Title]] into clickable HTML links before feeding to marked.
+  const s = String(md || "");
+  return s.replace(/\[\[([^\]\n]{1,200})\]\]/g, (_m, inner) => {
+    const raw = String(inner || "").trim();
+    if (!raw) return _m;
+    const parts = raw.split("|");
+    const title = (parts[0] || "").trim();
+    const label = (parts[1] || title).trim();
+    if (!title) return _m;
+    return `<a href="#" class="enkidu-wikilink" data-wikilink-title="${escapeHtml(title)}">${escapeHtml(
+      label
+    )}</a>`;
+  });
+}
+
+function extractWikilinkTitles(text) {
+  // Purpose: parse [[Title]] and [[Title|Label]] from raw text.
+  const s = String(text || "");
+  const out = [];
+  const re = /\[\[([^\]\n]{1,200})\]\]/g;
+  let m;
+  while ((m = re.exec(s))) {
+    const inner = String(m[1] || "").trim();
+    if (!inner) continue;
+    const title = String(inner.split("|")[0] || "").trim();
+    if (!title) continue;
+    out.push(title);
+  }
+  // Unique (preserve order).
+  const seen = new Set();
+  const uniq = [];
+  for (const t of out) {
+    const k = t.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    uniq.push(t);
+  }
+  return uniq;
+}
+
+function findOpenWikilink(value, caretIdx) {
+  // Purpose: find the active `[[...` segment before the caret that does not have a closing `]]` yet.
+  const upToCaret = value.slice(0, caretIdx);
+  const start = upToCaret.lastIndexOf("[[");
+  if (start < 0) return null;
+  const after = upToCaret.slice(start + 2);
+  if (after.includes("]]")) return null;
+  return { startIdx: start, query: after };
+}
+
+function fuzzyScore(query, text) {
+  // Purpose: minimal fuzzy match. Prefer substring; else prefer in-order character hits.
+  const q = String(query || "").toLowerCase().trim();
+  const t = String(text || "").toLowerCase();
+  if (!q) return 1;
+  const idx = t.indexOf(q);
+  if (idx >= 0) return 1000 - idx;
+  let qi = 0;
+  let score = 0;
+  for (let i = 0; i < t.length && qi < q.length; i++) {
+    if (t[i] === q[qi]) {
+      score += 5;
+      qi++;
+    } else if (q.includes(t[i])) {
+      score += 1;
+    }
+  }
+  return qi === q.length ? score : 0;
+}
+
+function positionPickerNearEl(el) {
+  const picker = $("wikilinkPicker");
+  if (!picker) return;
+  const r = el.getBoundingClientRect();
+  const w = picker.offsetWidth || 420;
+  const left = Math.max(8, Math.min(window.innerWidth - w - 8, r.left));
+  const top = Math.min(window.innerHeight - 8, r.bottom + 6);
+  picker.style.left = `${left}px`;
+  picker.style.top = `${top}px`;
+}
+
+function closeWikilinkPicker() {
+  wikilinkPicker = null;
+  const picker = $("wikilinkPicker");
+  if (picker) picker.style.display = "none";
+}
+
+async function openOrUpdateWikilinkPicker(targetEl) {
+  const el = targetEl;
+  if (!el) return;
+  const caret = el.selectionStart ?? 0;
+  const value = String(el.value || "");
+
+  const hit = findOpenWikilink(value, caret);
+  if (!hit) return closeWikilinkPicker();
+
+  const pages = await ensureRecentPagesCache();
+  const titled = (pages || []).filter((p) => (p?.title || "").trim());
+
+  const scored = titled
+    .map((p) => ({
+      p,
+      score: fuzzyScore(hit.query, p.title),
+    }))
+    .filter((x) => x.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 30)
+    .map((x) => x.p);
+
+  wikilinkPicker = {
+    open: true,
+    targetId: el.id,
+    startIdx: hit.startIdx,
+    activeIdx: 0,
+    items: scored,
+  };
+
+  const picker = $("wikilinkPicker");
+  const list = $("wikilinkPickerList");
+  const qEl = $("wikilinkPickerQuery");
+  if (!picker || !list || !qEl) return;
+
+  qEl.textContent = `[[${hit.query}`;
+  list.innerHTML = "";
+
+  for (let i = 0; i < scored.length; i++) {
+    const p = scored[i];
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = `list-group-item list-group-item-action py-1 ${i === 0 ? "active" : ""}`;
+    const when = p.created_at ? new Date(p.created_at).toLocaleDateString() : "";
+    btn.innerHTML = `<div class="d-flex justify-content-between gap-2">
+      <div class="text-truncate">${escapeHtml(p.title)}</div>
+      <div class="small text-secondary flex-shrink-0">${escapeHtml(when)}</div>
+    </div>`;
+    btn.onclick = () => insertWikilinkSelection(i);
+    list.appendChild(btn);
+  }
+
+  picker.style.display = "block";
+  positionPickerNearEl(el);
+}
+
+function highlightPickerIndex(idx) {
+  const list = $("wikilinkPickerList");
+  if (!list) return;
+  const items = Array.from(list.querySelectorAll(".list-group-item"));
+  for (let i = 0; i < items.length; i++) {
+    items[i].classList.toggle("active", i === idx);
+  }
+}
+
+function insertWikilinkSelection(idx) {
+  if (!wikilinkPicker?.open) return;
+  const el = $(wikilinkPicker.targetId);
+  if (!el) return closeWikilinkPicker();
+  const items = wikilinkPicker.items || [];
+  const picked = items[idx];
+  if (!picked) return closeWikilinkPicker();
+
+  const caret = el.selectionStart ?? 0;
+  const value = String(el.value || "");
+  const startIdx = wikilinkPicker.startIdx;
+  const title = String(picked.title || "").trim();
+  if (!title) return closeWikilinkPicker();
+
+  const needsClose = value.slice(caret, caret + 2) !== "]]";
+  const insert = `[[${title}${needsClose ? "]]" : ""}`;
+
+  const before = value.slice(0, startIdx);
+  const after = value.slice(caret);
+  el.value = `${before}${insert}${after}`;
+  const newCaret = (before + insert).length;
+  el.focus();
+  el.setSelectionRange(newCaret, newCaret);
+  closeWikilinkPicker();
+
+  // Keep preview synced if we inserted into the page editor.
+  if (el.id === "pageContent") renderPreview();
+}
+
+function handleWikilinkKeydown(e) {
+  if (!wikilinkPicker?.open) return;
+  if (wikilinkPicker.targetId !== e.target?.id) return;
+  const items = wikilinkPicker.items || [];
+  if (!items.length) return;
+
+  if (e.key === "Escape") {
+    e.preventDefault();
+    closeWikilinkPicker();
+    return;
+  }
+  if (e.key === "ArrowDown") {
+    e.preventDefault();
+    wikilinkPicker.activeIdx = Math.min(items.length - 1, (wikilinkPicker.activeIdx || 0) + 1);
+    highlightPickerIndex(wikilinkPicker.activeIdx);
+    return;
+  }
+  if (e.key === "ArrowUp") {
+    e.preventDefault();
+    wikilinkPicker.activeIdx = Math.max(0, (wikilinkPicker.activeIdx || 0) - 1);
+    highlightPickerIndex(wikilinkPicker.activeIdx);
+    return;
+  }
+  if (e.key === "Enter") {
+    e.preventDefault();
+    insertWikilinkSelection(wikilinkPicker.activeIdx || 0);
+    return;
+  }
+}
+
+function getRelatedMatchers() {
+  // Purpose: read the Related matchers (multi-select). Default is all ON (= old "mixed").
+  return {
+    time: !!$("matchTime")?.checked,
+    text: !!$("matchText")?.checked,
+    title: !!$("matchTitle")?.checked,
+    embeddings: !!$("matchEmbeddings")?.checked,
+  };
 }
 
 function isRecallSearchActive() {
   // Purpose: if any recall search field is non-empty, we are in "search" mode (not "related").
-  const q = ($("recallQuery")?.value || "").trim();
   const tag = ($("recallTag")?.value || "").trim();
   const kvKey = ($("recallKvKey")?.value || "").trim();
   const kvValue = ($("recallKvValue")?.value || "").trim();
-  return !!(q || tag || kvKey || kvValue);
+  return !!(tag || kvKey || kvValue);
 }
 
 function getVisibleRecallIds() {
@@ -205,12 +574,99 @@ function scoreOverlap(queryTokens, pageText) {
   return hit;
 }
 
+function updateKvKeySuggestionsFromPages(pages, { limit = 20 } = {}) {
+  // Purpose: suggest common KV keys in the KV key filter box + compute key->topValue stats.
+  const dl = $("kvKeySuggestions");
+  if (!dl) return;
+
+  const keyCounts = new Map(); // key -> count
+  const perKeyValueCounts = new Map(); // key -> Map(value -> count)
+
+  for (const p of pages || []) {
+    const kv = p?.kv_tags;
+    if (!kv || typeof kv !== "object" || Array.isArray(kv)) continue;
+    for (const [k, v] of Object.entries(kv)) {
+      const key = String(k).trim();
+      if (!key) continue;
+      keyCounts.set(key, (keyCounts.get(key) || 0) + 1);
+
+      const value = String(v ?? "").trim();
+      if (!perKeyValueCounts.has(key)) perKeyValueCounts.set(key, new Map());
+      const m = perKeyValueCounts.get(key);
+      m.set(value, (m.get(value) || 0) + 1);
+    }
+  }
+
+  // Build stats: choose most common value for each key.
+  kvTagStats = new Map();
+  for (const [key, m] of perKeyValueCounts.entries()) {
+    let topValue = "";
+    let topCount = -1;
+    for (const [value, c] of m.entries()) {
+      if (c > topCount) {
+        topCount = c;
+        topValue = value;
+      }
+    }
+    kvTagStats.set(key, { topValue, counts: m });
+  }
+
+  const topKeys = Array.from(keyCounts.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, limit)
+    .map(([key]) => key);
+
+  dl.innerHTML = "";
+  for (const key of topKeys) {
+    const opt = document.createElement("option");
+    opt.value = key;
+    dl.appendChild(opt);
+  }
+}
+
 async function ensureRecentPagesCache() {
   if (recentPagesCache) return recentPagesCache;
-  const data = await apiFetch(`/api/pages?limit=500`);
+  // Load a larger window so wikilink/title pickers can see "any page" in normal use.
+  const data = await apiFetch(`/api/pages?limit=2000`);
   recentPagesCache = data.pages || [];
   updateTagSuggestionsFromPages(recentPagesCache);
+  updateKvKeySuggestionsFromPages(recentPagesCache);
   return recentPagesCache;
+}
+
+async function openPageById(pageId) {
+  // Purpose: centralise "open this page in the editor" for wikilinks and list clicks.
+  setStatus("Loading page...", "secondary");
+  const one = await apiFetch(`/api/page?id=${encodeURIComponent(pageId)}`);
+  setSelectedPage(one.page);
+  setStatus("Page loaded.", "success");
+}
+
+async function openPageByTitle(title) {
+  // Purpose: resolve a wikilink title to a page (most recent wins if duplicates).
+  const pages = await ensureRecentPagesCache();
+  const want = String(title || "").trim().toLowerCase();
+  if (!want) throw new Error("Missing wikilink title");
+
+  const matches = (pages || []).filter((p) => String(p?.title || "").trim().toLowerCase() === want);
+  if (!matches.length) throw new Error(`No page titled: ${title}`);
+
+  matches.sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
+  if (matches.length > 1) {
+    setStatus(`Multiple pages titled "${title}" — opening the most recent.`, "warning");
+  }
+  await openPageById(matches[0].id);
+}
+
+async function resolveTitleToPageId(title) {
+  // Purpose: resolve a title to a page ID (most recent wins). Used for auto-payload on chat send.
+  const pages = await ensureRecentPagesCache();
+  const want = String(title || "").trim().toLowerCase();
+  if (!want) return null;
+  const matches = (pages || []).filter((p) => String(p?.title || "").trim().toLowerCase() === want);
+  if (!matches.length) return null;
+  matches.sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
+  return matches[0]?.id || null;
 }
 
 function updatePayloadCount() {
@@ -226,7 +682,7 @@ let isEditingMarkdown = false; // merged markdown+preview: preview by default wh
 
 function renderPreview() {
   const md = $("pageContent").value || "";
-  $("pagePreview").innerHTML = window.marked ? window.marked.parse(md) : md;
+  $("pagePreview").innerHTML = window.marked ? window.marked.parse(preprocessWikilinks(md)) : md;
 }
 
 function syncMarkdownWidget() {
@@ -254,12 +710,53 @@ function setSelectedPage(page) {
   $("pageContent").value = page?.content_md || "";
   isEditingMarkdown = false;
   syncMarkdownWidget();
+  refreshClearButtons();
 }
 
 function renderRecallResults(pages) {
   const root = $("recallResults");
   root.innerHTML = "";
 
+  // Purpose: compute per-list normalization so we can show a right-border intensity scale.
+  const embDistances = (pages || [])
+    .filter((p) => p?._enkidu_rel?.kind === "embeddings")
+    .map((p) => Number(p?._enkidu_rel?.distance))
+    .filter((d) => Number.isFinite(d));
+  const embMin = embDistances.length ? Math.min(...embDistances) : null;
+  const embMax = embDistances.length ? Math.max(...embDistances) : null;
+
+  const heurScores = (pages || [])
+    .filter((p) => p?._enkidu_rel?.kind === "heuristic")
+    .map((p) => Number(p?._enkidu_rel?.score))
+    .filter((s) => Number.isFinite(s));
+  const heurMin = heurScores.length ? Math.min(...heurScores) : null;
+  const heurMax = heurScores.length ? Math.max(...heurScores) : null;
+
+  function clamp01(x) {
+    if (!Number.isFinite(x)) return 0;
+    return Math.max(0, Math.min(1, x));
+  }
+
+  function relatedStrength01(p) {
+    const rel = p?._enkidu_rel;
+    if (rel?.kind === "embeddings" && embMin != null && embMax != null) {
+      const d = Number(rel.distance);
+      if (!Number.isFinite(d)) return 0;
+      const denom = embMax - embMin || 1;
+      // Lower distance => stronger.
+      return clamp01(1 - (d - embMin) / denom);
+    }
+    if (rel?.kind === "heuristic" && heurMin != null && heurMax != null) {
+      const s = Number(rel.score);
+      if (!Number.isFinite(s)) return 0;
+      const denom = heurMax - heurMin || 1;
+      // Higher score => stronger.
+      return clamp01((s - heurMin) / denom);
+    }
+    return 0;
+  }
+
+  dbg("renderRecallResults", { count: (pages || []).length });
   for (const p of pages || []) {
     const row = document.createElement("div");
     row.className = "enkidu-result-row mb-1";
@@ -282,16 +779,16 @@ function renderRecallResults(pages) {
     const title = p.title || (p.content_md || "").slice(0, 80) || "(untitled)";
     const when = p.created_at ? new Date(p.created_at).toLocaleString() : "";
     btn.textContent = `${title} — ${when}`;
-    btn.onclick = async () => {
-      try {
-        setStatus("Loading page...", "secondary");
-        const one = await apiFetch(`/api/page?id=${encodeURIComponent(p.id)}`);
-        setSelectedPage(one.page);
-        setStatus("Page loaded.", "success");
-      } catch (e) {
-        setStatus(String(e.message || e), "danger");
-      }
-    };
+    const strength = relatedStrength01(p);
+    btn.style.borderRightWidth = "6px";
+    btn.style.borderRightStyle = "solid";
+    if (strength > 0) {
+      const a = 0.15 + 0.85 * strength; // stronger => more intense
+      btn.style.borderRightColor = `rgba(25, 135, 84, ${a.toFixed(3)})`; // Bootstrap "success" green
+    } else {
+      btn.style.borderRightColor = "rgba(108, 117, 125, 0.18)"; // Bootstrap "secondary" gray
+    }
+    btn.onclick = () => openPageById(p.id);
 
     row.appendChild(cb);
     row.appendChild(btn);
@@ -302,32 +799,46 @@ function renderRecallResults(pages) {
 }
 
 async function recallSearch() {
-  const q = ($("recallQuery").value || "").trim();
   const tag = ($("recallTag").value || "").trim();
   const kvKey = ($("recallKvKey")?.value || "").trim();
   const kvValue = ($("recallKvValue")?.value || "").trim();
+  const draft = ($("chatInput")?.value || "").trim();
+  const matchers0 = getRelatedMatchers();
+  dbg("recallSearch:start", {
+    mode: tag || kvKey || kvValue ? "search" : "related",
+    draftLen: draft.length,
+    tag,
+    kvKey,
+    kvValue,
+    matchers: matchers0,
+  });
 
-  // If user typed a recall query, use server search.
-  if (q || tag || kvKey || kvValue) {
+  // If user typed tag/KV filters, use server search (optional substring q from chat draft).
+  if (tag || kvKey || kvValue) {
     if ((kvKey && !kvValue) || (!kvKey && kvValue)) {
       throw new Error("KV filter requires both key and value");
     }
     setStatus("Searching...", "secondary");
+    const chatQ = ($("chatInput")?.value || "").trim();
     const params = [];
     params.push("limit=50");
-    if (q) params.push(`q=${encodeURIComponent(q)}`);
+    if (chatQ) params.push(`q=${encodeURIComponent(chatQ)}`);
     if (tag) params.push(`tag=${encodeURIComponent(tag)}`);
     if (kvKey) params.push(`kv_key=${encodeURIComponent(kvKey)}`);
     if (kvValue) params.push(`kv_value=${encodeURIComponent(kvValue)}`);
+    dbg("recallSearch:serverSearch", { params });
     const data = await apiFetch(`/api/pages?${params.join("&")}`);
     renderRecallResults(data.pages);
     setStatus(`Found ${data.pages?.length || 0} pages.`, "success");
+    dbg("recallSearch:serverSearch:done", { count: data.pages?.length || 0 });
     return;
   }
 
   // Otherwise: "related pages" mode based on current chatbox text.
   const chatText = ($("chatInput").value || "").trim();
-  const preset = getRelatedPreset();
+  const matchers = getRelatedMatchers();
+  const requestSeq = ++relatedRequestSeq;
+  dbg("recallSearch:related", { requestSeq, chatTextLen: chatText.length, matchers });
 
   setStatus("Loading related pages...", "secondary");
 
@@ -340,72 +851,128 @@ async function recallSearch() {
     const recent = candidates.slice(0, 50);
     renderRecallResults(recent);
     setStatus(`Related: showing ${recent.length} recent answers.`, "success");
+    dbg("recallSearch:related:emptyDraft", { requestSeq, recent: recent.length });
     return;
   }
 
   async function loadEmbeddingsRelated(limit = 50) {
     // Purpose: server-side semantic similarity using pgvector.
-    const data = await apiFetch(`/api/pages?limit=${encodeURIComponent(limit)}&related_to=${encodeURIComponent(chatText)}`);
-    return data.pages || [];
+    dbg("embeddings:start", { requestSeq, limit, chatTextLen: chatText.length });
+    const data = await apiFetch(
+      `/api/pages?limit=${encodeURIComponent(limit)}&related_to=${encodeURIComponent(chatText)}`
+    );
+    dbg("embeddings:done", {
+      requestSeq,
+      count: data.pages?.length || 0,
+      head: (data.pages || []).slice(0, 5).map((p) => ({
+        id: p?.id,
+        distance: p?.distance,
+        len: (p?.content_md || "").length,
+        title: p?.title || "",
+      })),
+    });
+    return (data.pages || []).map((p) => ({
+      ...p,
+      _enkidu_rel: { kind: "embeddings", distance: p?.distance },
+    }));
   }
 
   const queryTokens = tokenize(chatText).slice(0, 40);
   const pages = await ensureRecentPagesCache();
 
-  // Prefer older answers (assistant chat) before the user sends anything.
-  const candidates = pages.filter(
-    (p) => (p?.kv_tags?.role === "assistant" || p?.kv_tags?.role === "user") && (p?.tags || []).includes("chat")
-  );
-
-  function tagOverlapScore(tokens, pageTags) {
-    const set = new Set((pageTags || []).map((t) => String(t).toLowerCase()));
-    let hit = 0;
-    for (const t of tokens) if (set.has(t)) hit++;
-    return hit;
-  }
+  // Candidate set:
+  // - By default, keep this focused on chat history (so Related behaves like "similar past chats").
+  // - If Title matching is enabled, widen to *all* pages (so you can match titles of notes/base pages),
+  //   but still skip prompt cards that are operational.
+  const candidates = matchers.title
+    ? pages.filter((p) => {
+        const tags = p?.tags || [];
+        if (tags.includes("dream-prompt")) return false;
+        if (tags.includes("split-prompt")) return false;
+        return true;
+      })
+    : pages.filter(
+        (p) => (p?.kv_tags?.role === "assistant" || p?.kv_tags?.role === "user") && (p?.tags || []).includes("chat")
+      );
+  dbg("recallSearch:candidates", {
+    requestSeq,
+    candidates: candidates.length,
+    queryTokens: queryTokens.length,
+    scope: matchers.title ? "all-pages" : "chat-only",
+  });
 
   function recencyScore(createdAt) {
     const ts = createdAt ? new Date(createdAt).getTime() : 0;
     return ts;
   }
 
-  const scored = candidates
-    .map((p) => {
-      const textScore = scoreOverlap(queryTokens, p.content_md || "");
-      const tagsScore = tagOverlapScore(queryTokens, p.tags || []);
-      const timeScore = recencyScore(p.created_at);
+  const useHeuristic = matchers.time || matchers.text || matchers.title;
+  const scored = useHeuristic
+    ? candidates
+        .map((p) => {
+          const textScore = scoreOverlap(queryTokens, p.content_md || "");
+          const titleScore = scoreOverlap(queryTokens, p.title || "");
+          const timeScore = recencyScore(p.created_at);
 
-      let score = 0;
-      if (preset === "time") score = timeScore;
-      else if (preset === "tags") score = tagsScore;
-      else if (preset === "text") score = textScore;
-      else score = textScore * 3 + tagsScore * 8 + (timeScore / 1e12); // mixed: mostly similarity, slight recency
+          // Simple weighted mix: title overlap is stronger signal than body overlap.
+          const score =
+            (matchers.text ? textScore * 3 : 0) +
+            (matchers.title ? titleScore * 6 : 0) +
+            (matchers.time ? timeScore / 1e12 : 0);
 
-      return { p, score };
-    })
-    .filter((x) => x.score > 0 || preset === "time")
-    .sort((a, b) => b.score - a.score);
+          return { p, score, textScore, titleScore };
+        })
+        // If any lexical matcher is enabled (text/title), require at least one hit; otherwise time-only would include everything.
+        .filter((x) => {
+          const needLex = matchers.text || matchers.title;
+          if (!needLex) return true;
+          return (matchers.text && x.textScore > 0) || (matchers.title && x.titleScore > 0);
+        })
+        .sort((a, b) => b.score - a.score)
+    : [];
 
-  const topHeuristic = scored.slice(0, 50).map((x) => x.p);
+  const topHeuristic = useHeuristic
+    ? scored.slice(0, 50).map((x) => ({
+        ...x.p,
+        _enkidu_rel: { kind: "heuristic", score: x.score, textScore: x.textScore },
+      }))
+    : [];
+  dbg("recallSearch:heuristic", { requestSeq, useHeuristic, topHeuristic: topHeuristic.length });
 
-  if (preset === "embeddings") {
-    const emb = await loadEmbeddingsRelated(50);
-    renderRecallResults(emb);
-    setStatus(`Related: showing ${emb.length} most similar pages (embeddings).`, "success");
+  // If embeddings are OFF: just show heuristic (which may be empty).
+  if (!matchers.embeddings) {
+    renderRecallResults(topHeuristic);
+    setStatus(`Related: showing ${topHeuristic.length} pages.`, "success");
+    dbg("recallSearch:final", { requestSeq, mode: "heuristic-only", count: topHeuristic.length });
     return;
   }
 
-  if (preset === "mixed") {
-    const emb = await loadEmbeddingsRelated(25);
+  // Embeddings are ON. If we also have heuristic matchers ON, show heuristic immediately, then merge in embeddings.
+  const haveHeuristic = topHeuristic.length > 0;
+  if (haveHeuristic) {
+    renderRecallResults(topHeuristic);
+    setStatus(`Related: showing ${topHeuristic.length} pages (loading embeddings).`, "secondary");
+  }
+
+  try {
+    const emb = await loadEmbeddingsRelated(haveHeuristic ? 25 : 50);
+    if (requestSeq !== relatedRequestSeq) return; // stale (user typed again)
     const embIds = new Set(emb.map((p) => p.id));
-    const merged = [...emb, ...topHeuristic.filter((p) => !embIds.has(p.id))].slice(0, 50);
+    const merged = haveHeuristic ? [...emb, ...topHeuristic.filter((p) => !embIds.has(p.id))].slice(0, 50) : emb;
     renderRecallResults(merged);
-    setStatus(`Related: showing ${merged.length} pages (mixed).`, "success");
-    return;
+    setStatus(`Related: showing ${merged.length} pages.`, "success");
+    dbg("recallSearch:final", {
+      requestSeq,
+      mode: haveHeuristic ? "embeddings+heuristic" : "embeddings-only",
+      merged: merged.length,
+      emb: emb.length,
+      heuristic: topHeuristic.length,
+    });
+  } catch (e) {
+    if (requestSeq !== relatedRequestSeq) return;
+    setStatus(String(e.message || e), "danger");
+    dbg("recallSearch:error", { requestSeq, error: String(e?.message || e) });
   }
-
-  renderRecallResults(topHeuristic);
-  setStatus(`Related: showing ${topHeuristic.length} similar pages.`, "success");
 }
 
 async function savePage() {
@@ -492,11 +1059,13 @@ function renderChatLog(pages) {
     const body = document.createElement("div");
     // Purpose: assistant replies are Markdown; render as HTML for readability.
     // NOTE: this renders HTML produced by `marked` (treat assistant content as untrusted).
-    if (role === "assistant" && window.marked) body.innerHTML = window.marked.parse(p.content_md || "");
+    if (role === "assistant" && window.marked)
+      body.innerHTML = window.marked.parse(preprocessWikilinks(p.content_md || ""));
     else body.textContent = p.content_md || "";
 
     div.appendChild(head);
     div.appendChild(body);
+
     root.appendChild(div);
   }
 
@@ -521,7 +1090,19 @@ async function sendChat() {
   const threadId = ($("threadSelect").value || "").trim();
   if (!msg.trim()) return;
 
+  // Auto-payload: if draft contains [[wikilinks]], include those pages as context payload.
+  const linkTitles = extractWikilinkTitles(msg);
+  if (linkTitles.length) {
+    for (const t of linkTitles) {
+      const id = await resolveTitleToPageId(t);
+      if (id) selectedPayloadIds.add(id);
+    }
+    updatePayloadCount();
+    updateRelatedToggleLabel();
+  }
+
   $("chatInput").value = "";
+  refreshClearButtons();
   setStatus("Sending...", "secondary");
 
   const model = $("chatModel").value || null;
@@ -557,10 +1138,18 @@ function newThread() {
 // -------------------------
 
 function init() {
+  initClearButtons();
   $("adminToken").value = getToken();
+  refreshClearButtons();
   updatePayloadCount();
   if ($("allowSecrets")) $("allowSecrets").checked = getAllowSecrets();
   if ($("useWebSearch")) $("useWebSearch").checked = getUseWebSearch();
+  if ($("liveRelated")) $("liveRelated").checked = getLiveRelated();
+  dbg("init", {
+    allowSecrets: getAllowSecrets(),
+    useWebSearch: getUseWebSearch(),
+    matchers: getRelatedMatchers(),
+  });
 
   $("saveToken").onclick = () => {
     setToken(($("adminToken").value || "").trim());
@@ -574,6 +1163,13 @@ function init() {
   });
   $("useWebSearch")?.addEventListener("change", () => {
     setUseWebSearch(!!$("useWebSearch").checked);
+  });
+  $("liveRelated")?.addEventListener("change", () => {
+    setLiveRelated(!!$("liveRelated").checked);
+    // If turning on, refresh immediately (then typing will keep it updated).
+    if ($("liveRelated").checked && !isRecallSearchActive()) {
+      recallSearch().catch(() => {});
+    }
   });
   $("toggleRelatedAll")?.addEventListener("click", () => {
     const ids = getVisibleRecallIds();
@@ -593,50 +1189,67 @@ function init() {
   });
 
   $("recallSearch").onclick = () => recallSearch().catch((e) => setStatus(e.message, "danger"));
-  for (const el of document.querySelectorAll('input[name="relatedPreset"]')) {
-    el.addEventListener("change", () => {
+  for (const el of ["matchTime", "matchText", "matchTitle", "matchEmbeddings"]) {
+    $(el)?.addEventListener("change", () => {
+      dbg("matchers:change", { matchers: getRelatedMatchers(), searchActive: isRecallSearchActive() });
       if (isRecallSearchActive()) return;
       recallSearch().catch(() => {});
     });
   }
-  $("recallQuery").addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      recallSearch().catch((err) => setStatus(err.message, "danger"));
-    }
-  });
-  // Live search (debounced) for text + tag fields.
+  // Live search (debounced) for tag + KV fields.
   let recallDebounce = null;
   function liveRecall() {
     if (recallDebounce) clearTimeout(recallDebounce);
     recallDebounce = setTimeout(() => recallSearch().catch(() => {}), 200);
   }
-  $("recallQuery").addEventListener("input", liveRecall);
   $("recallTag").addEventListener("input", liveRecall);
   $("recallKvKey")?.addEventListener("input", liveRecall);
   $("recallKvValue")?.addEventListener("input", liveRecall);
+  $("recallKvKey")?.addEventListener("change", async () => {
+    // Purpose: when a KV key is selected from suggestions, prefill the value with the most common one.
+    if (!kvTagStats) await ensureRecentPagesCache().catch(() => {});
+    const key = ($("recallKvKey")?.value || "").trim();
+    const valueEl = $("recallKvValue");
+    if (!key || !valueEl) return;
+    if ((valueEl.value || "").trim()) return; // don't override user input
+    const topValue = kvTagStats?.get(key)?.topValue ?? "";
+    if (topValue) {
+      valueEl.value = topValue;
+      recallSearch().catch(() => {});
+    }
+  });
   $("newPage").onclick = () => setSelectedPage(null);
-  $("newSystemCard").onclick = () =>
-    newCard(["system", "preference"], "System prompt", ``);
-  $("newStyleCard").onclick = () =>
-    newCard(["style", "preference"], "Style", ``);
-  $("newBioCard").onclick = () => newCard(["bio", "preference"], "Bio", ``);
-  $("newStrategyCard").onclick = () =>
-    newCard(["strategy", "preference"], "Strategy", ``);
-  $("newDreamCard").onclick = () =>
-    newCard(["dream-prompt", "preference"], "Dream prompt", ``);
-  $("newSplitCard").onclick = () =>
-    newCard(["split-prompt", "preference"], "Split prompt", ``);
+  $("pageTagPreset")?.addEventListener("change", () => {
+    // Purpose: add a predefined tag set to the Tags box (deduped).
+    const sel = $("pageTagPreset");
+    const raw = sel?.value || "";
+    if (!raw) return;
+    const preset = raw
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const el = $("pageTags");
+    const merged = Array.from(new Set([...parseTags(el?.value), ...preset]));
+    if (el) {
+      el.value = merged.join(", ");
+      dispatchInputEvents(el);
+    }
+    sel.value = "";
+  });
   $("savePage").onclick = () => savePage().catch((e) => setStatus(e.message, "danger"));
   $("deletePage").onclick = () => deletePage().catch((e) => setStatus(e.message, "danger"));
   $("pageContent").addEventListener("input", () => {
     // While editing, keep preview up-to-date (even if hidden).
     renderPreview();
+    // Wikilink picker in markdown editor.
+    openOrUpdateWikilinkPicker($("pageContent")).catch(() => {});
   });
+  $("pageContent").addEventListener("keydown", handleWikilinkKeydown);
   $("pageContent").addEventListener("blur", () => {
     // Leave edit mode on blur.
     isEditingMarkdown = false;
     syncMarkdownWidget();
+    closeWikilinkPicker();
   });
   $("pagePreview").addEventListener("dblclick", () => {
     // Enter edit mode on double-click.
@@ -647,6 +1260,8 @@ function init() {
 
   $("sendChat").onclick = () => sendChat().catch((e) => setStatus(e.message, "danger"));
   $("chatInput").addEventListener("keydown", (e) => {
+    handleWikilinkKeydown(e);
+    if (e.defaultPrevented) return; // wikilink picker consumed the key (e.g. Enter to select)
     // Enter submits; Shift+Enter inserts newline (since this is a textarea).
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -654,12 +1269,39 @@ function init() {
     }
   });
   $("chatInput").addEventListener("input", () => {
-    // While recallQuery is empty, keep the related pages list synced to chat input.
+    // While recall search fields are empty, keep the related pages list synced to chat input.
+    dbg("chatInput:input", { len: ($("chatInput")?.value || "").length, searchActive: isRecallSearchActive() });
+
+    // Wikilink picker in chat box.
+    openOrUpdateWikilinkPicker($("chatInput")).catch(() => {});
+
     if (isRecallSearchActive()) return;
+    if (!getLiveRelated()) return;
     if (relatedDebounce) clearTimeout(relatedDebounce);
     relatedDebounce = setTimeout(() => {
       recallSearch().catch(() => {});
     }, 800);
+  });
+
+  // Click wikilinks in previews/chat to open pages.
+  $("pagePreview")?.addEventListener("click", (e) => {
+    const a = e.target?.closest?.("a.enkidu-wikilink");
+    if (!a) return;
+    e.preventDefault();
+    openPageByTitle(a.dataset.wikilinkTitle).catch((err) => setStatus(err.message, "danger"));
+  });
+  $("chatLog")?.addEventListener("click", (e) => {
+    const a = e.target?.closest?.("a.enkidu-wikilink");
+    if (!a) return;
+    e.preventDefault();
+    openPageByTitle(a.dataset.wikilinkTitle).catch((err) => setStatus(err.message, "danger"));
+  });
+
+  window.addEventListener("resize", () => {
+    if (wikilinkPicker?.open) {
+      const el = $(wikilinkPicker.targetId);
+      if (el) positionPickerNearEl(el);
+    }
   });
   $("reloadChat").onclick = () => reloadThread().catch((e) => setStatus(e.message, "danger"));
   $("newThread").onclick = () => newThread();
@@ -723,16 +1365,6 @@ function renderThreadOptions(threads, selectedThreadId) {
 async function loadThreads(selectThreadId = null) {
   const data = await apiFetch("/api/threads");
   renderThreadOptions(data.threads || [], selectThreadId);
-}
-
-function newCard(tags, title, content) {
-  setSelectedPage(null);
-  $("pageTags").value = tags.join(", ");
-  $("pageTitle").value = title || "";
-  $("pageKvTags").value = "{}";
-  $("pageContent").value = content || "";
-  isEditingMarkdown = false;
-  syncMarkdownWidget();
 }
 
 async function runDream() {

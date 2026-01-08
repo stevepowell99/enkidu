@@ -20,12 +20,12 @@ function toPgvectorLiteral(values) {
   return `[${nums.join(",")}]`;
 }
 
-async function makeEmbeddingFields({ content_md }) {
-  // Purpose: build the fields we store alongside a page row.
+async function makeEmbeddingFields({ content_md, taskType = "RETRIEVAL_DOCUMENT" }) {
+  // Purpose: build the fields we store alongside a page row (or embed a query when taskType=RETRIEVAL_QUERY).
   const text = truncateForEmbedding(content_md);
   if (!text) return null;
 
-  const { model, values } = await geminiEmbed({ text, taskType: "RETRIEVAL_DOCUMENT" });
+  const { model, values } = await geminiEmbed({ text, taskType });
   return {
     embedding: toPgvectorLiteral(values),
     embedding_model: model,

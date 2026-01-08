@@ -45,6 +45,18 @@
   margin-bottom: 0;
 }
 
+.enkidu-wikilink {
+  /* Purpose: make [[Title]] links obvious and clickable. */
+  text-decoration: underline;
+  text-decoration-style: dotted;
+}
+
+#wikilinkPicker {
+  /* Purpose: keep the picker readable without taking over the screen. */
+  max-height: 50vh;
+  overflow: auto;
+}
+
 .enkidu-result-row {
   display: flex;
   gap: 0.5rem;
@@ -53,6 +65,42 @@
 
 .enkidu-result-row input[type="checkbox"] {
   margin-top: 0.35rem;
+}
+
+/* -------------------------
+   Clear ("X") buttons for text entry boxes
+   ------------------------- */
+
+.enkidu-clear-wrap {
+  /* Purpose: wrapper that lets us position an X over standalone inputs/textareas. */
+  position: relative;
+}
+
+.enkidu-clear-btn-absolute {
+  /* Purpose: small X inside the control; shown only when there is a value. */
+  position: absolute;
+  right: 0.5rem;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 3;
+  opacity: 0.7;
+}
+
+.enkidu-clear-btn-absolute:hover {
+  opacity: 1;
+}
+
+/* Textareas: put the X in the top-right corner (better UX for tall fields). */
+.enkidu-clear-wrap-textarea .enkidu-clear-btn-absolute {
+  top: 0.6rem;
+  transform: none;
+}
+
+/* Inline clear button inside Bootstrap input-groups (sits next to the field). */
+.enkidu-clear-btn-inline {
+  /* Purpose: keep the button compact so input-groups don't balloon. */
+  padding-left: 0.45rem;
+  padding-right: 0.45rem;
 }
 
 
