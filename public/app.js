@@ -180,10 +180,11 @@ function setLiveRelated(on) {
 
 function readClipParams() {
   // Purpose: allow a bookmarklet to open Enkidu and auto-create a new page from URL/title/selection.
-  // Expected: ?clip=1&url=...&title=...&text=...
+  // Expected: ?clip=1&clip_id=...&url=...&title=...&text=...
   const sp = new URLSearchParams(window.location.search || "");
   if (sp.get("clip") !== "1") return null;
   return {
+    clip_id: sp.get("clip_id") || "",
     url: sp.get("url") || "",
     title: sp.get("title") || "",
     text: sp.get("text") || "",
@@ -192,7 +193,7 @@ function readClipParams() {
 
 function clearClipParamsFromUrl() {
   const u = new URL(window.location.href);
-  for (const k of ["clip", "url", "title", "text"]) u.searchParams.delete(k);
+  for (const k of ["clip", "clip_id", "url", "title", "text"]) u.searchParams.delete(k);
   const next = `${u.pathname}${u.search}${u.hash}`;
   window.history.replaceState({}, "", next);
 }
@@ -1348,6 +1349,16 @@ function init() {
   (async () => {
     const clip = readClipParams();
     if (!clip) return;
+
+    // Prevent duplicate creates if the page loads more than once with the same clip params.
+    const clipKey = String(clip.clip_id || "").trim() || `${clip.url}||${clip.title}||${clip.text}`.slice(0, 4000);
+    const seenKey = `enkidu_clip_seen:${clipKey}`;
+    if (sessionStorage.getItem(seenKey) === "1") {
+      clearClipParamsFromUrl();
+      dbg("clip:skip-duplicate", { clipKeyLen: clipKey.length });
+      return;
+    }
+    sessionStorage.setItem(seenKey, "1");
 
     // Fill editor first (so even if save fails you don't lose the clip).
     const url = String(clip.url || "").slice(0, 2000);
