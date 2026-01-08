@@ -178,6 +178,25 @@ function setLiveRelated(on) {
   sessionStorage.setItem(LS_LIVE_RELATED_KEY, on ? "1" : "0");
 }
 
+function readClipParams() {
+  // Purpose: allow a bookmarklet to open Enkidu and auto-create a new page from URL/title/selection.
+  // Expected: ?clip=1&url=...&title=...&text=...
+  const sp = new URLSearchParams(window.location.search || "");
+  if (sp.get("clip") !== "1") return null;
+  return {
+    url: sp.get("url") || "",
+    title: sp.get("title") || "",
+    text: sp.get("text") || "",
+  };
+}
+
+function clearClipParamsFromUrl() {
+  const u = new URL(window.location.href);
+  for (const k of ["clip", "url", "title", "text"]) u.searchParams.delete(k);
+  const next = `${u.pathname}${u.search}${u.hash}`;
+  window.history.replaceState({}, "", next);
+}
+
 async function apiFetch(path, { method = "GET", body } = {}) {
   const token = getToken();
   const allowSecrets = getAllowSecrets();
@@ -1324,6 +1343,45 @@ function init() {
       $("saveToken").click();
     }
   });
+
+  // Clip/bookmarklet support: fill a new page from URL params and auto-save if token is present.
+  (async () => {
+    const clip = readClipParams();
+    if (!clip) return;
+
+    // Fill editor first (so even if save fails you don't lose the clip).
+    const url = String(clip.url || "").slice(0, 2000);
+    const title = String(clip.title || "").slice(0, 200) || url || "(clip)";
+    const text = String(clip.text || "").slice(0, 8000);
+
+    setSelectedPage(null);
+    $("pageTitle").value = title;
+    $("pageTags").value = Array.from(new Set([...parseTags($("pageTags").value), "clip", "web"])).join(", ");
+    $("pageKvTags").value = JSON.stringify({ source_url: url }, null, 2);
+
+    const quote = text
+      ? `> ${text.trim().replace(/\n/g, "\n> ")}\n\n`
+      : "";
+    $("pageContent").value = `# ${title}\n\nSource: ${url}\n\n${quote}`;
+    isEditingMarkdown = false;
+    syncMarkdownWidget();
+    refreshClearButtons();
+
+    // Prevent repeat-creation on refresh.
+    clearClipParamsFromUrl();
+
+    if (!getToken()) {
+      setStatus("Clip ready. Paste admin token and click Save.", "warning");
+      return;
+    }
+
+    try {
+      await savePage();
+      setStatus("Clipped page saved.", "success");
+    } catch (e) {
+      setStatus(String(e.message || e), "danger");
+    }
+  })();
 
   // Try initial load if token exists.
   if (getToken()) {
