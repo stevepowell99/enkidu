@@ -18,16 +18,16 @@ Enkidu
 - 
 - Basically 2 parts to the UI: a standard chat bot (which also restores from history) and a "recall" panel to find and display past pages
 - There also are a smallish but extensible number of high-level **base pages** (they are just normal pages distinguished by tags) e.g.
-  - `system` (system prompt)
-  - `style` / `bio` / `strategy` (preference base pages)
-  - `dream-prompt` (dreaming instructions)
-  - `split-prompt` (instructions for splitting content into multiple pages)
+  - `*system` (system prompt)
+  - `*style` / `*bio` / `*strategy` (preference base pages)
+  - `*dream-prompt` (dreaming instructions)
+  - `*split-prompt` (instructions for splitting content into multiple pages)
 - As much as possible, functionality is provided by soft-coding via these base pages, i.e. user and Enkidu can change/adapt them on the fly
 - Can be used offline just for standard search and recall, saving notes, etc. I will use it both on phone and computer. sync challenge is resttricted to consolidating any work done offline.
 - Dreaming
   - This is something that happens in down time: Enkidu works fairly randomly through the pages, improving organisation primarily with tags, identifying near duplicates etc. also searches to make relevant updates to preference base pages so just gets increasingly delightful results over time. Also provide missing Summaries and adjust Title if necessary
   - Dreaming could use slower/cheaper API?
-  - Dreaming prompt instructions are a base page (`dream-prompt`).
+  - Dreaming prompt instructions are a base page (`*dream-prompt`).
   - When dreaming finished, add a page called a dream diary to summarise what was done, and if appropriate a base page called Tags Guide which explains the tagging system
   - 
 - Recall panel
@@ -61,32 +61,73 @@ Enkidu
   - Fields: `title`, `content_md`, `tags`, `kv_tags`, `thread_id`, `next_page_id`, timestamps
 - **Auth**: single shared token `ENKIDU_ADMIN_TOKEN` (Bearer token on every `/api/*` call)
 - **Netlify Functions API** (see `netlify/functions/`)
-  - `POST /api/chat`: calls Gemini + saves *each* user message and assistant reply as separate pages (same `thread_id`)
+  - `POST /api/chat`: calls Gemini + runs a simple **agent loop** + saves each “bubble” as a page (same `thread_id`)
     - **Context payload**: UI can select pages (checkboxes in Recall list) and send them as `context_page_ids` to be injected into the system instruction for that chat request
-    - **Soft-coded system + preferences**: system/prefs come from base pages (tags below); `dream-prompt` / `split-prompt` pages are *excluded* from normal chat injection
+    - **Soft-coded system prompt**: system prompt comes from the most recent `*system` base page
+    - **Prompt cards excluded from normal chat injection**: `*dream-prompt` / `*split-prompt`
     - **Optional page splitting**: if the assistant reply ends with `{\"enkidu_meta\":{...}}` containing `new_pages`, the backend creates those pages silently
-    - **Optional web search grounding**: UI toggle “Web search” sends `use_web_search: true` to enable Gemini’s `google_search` tool (when supported by your API key/model)
+    - **Optional web search grounding**: UI toggle “Web search” sends `use_web_search: true` which enables the agent tool `web_search` (Gemini `google_search` grounding)
+    - **Agent loop (tool use)**:
+      - The model must respond with a JSON envelope `{\"enkidu_agent\":{...}}` of type:
+        - `plan` (a short plan bubble)
+        - `tool_call` (one tool invocation)
+        - `final` (final answer)
+      - The server executes allowlisted tools and feeds the result back to the model, iterating up to a small cap.
+      - Each step is stored as its own chat bubble in `public.pages` (so you can see the plan + each tool call + each tool result).
+      - Bubble metadata is stored in `kv_tags`:
+        - `role`: `"user"` / `"assistant"`
+        - `bubble_kind`: `"plan" | "tool_call" | "tool_result" | "final"`
+        - `tool_name`, `tool_call_id`, `step_index` (for tool bubbles)
+      - To keep `netlify dev` from timing out, intermediate bubbles (`plan`, `tool_call`, `tool_result`) do **not** generate embeddings; user/final bubbles still do.
+    - **Agent allowlisted tools** (no raw SQL):
+      - `search_pages`: substring search + filters over `public.pages`
+      - `related_pages`: semantic vector search using pgvector (`rpc/match_pages`) from a query string
+      - `related_to_page`: semantic vector search using pgvector from an existing page id
+      - `related_to_most_recent_page`: semantic vector search using pgvector from the most recent page (optional filters)
+      - `get_page`: fetch one page by id
+      - `create_page`: create a page (writes DB)
+      - `update_page`: update a page by id (writes DB; allowed fields only)
+      - `delete_page`: delete a page (writes DB)
+      - `sql_select`: fallback for **arbitrary read-only SQL** (SELECT/CTE only; blocks UPDATE/DELETE/INSERT). Requires `SUPABASE_DB_URL`.
+      - `web_search`: (only when `use_web_search: true`) uses Gemini `google_search` grounding and returns a concise markdown answer
   - `GET /api/pages`: list + substring search (`q`) + filters (`tag`, `thread_id`)
   - `POST /api/pages`: create page
   - `GET/PUT/DELETE /api/page?id=...`: fetch/update/delete a page
   - `GET /api/tags`: returns distinct tags (from recent pages)
   - `GET /api/models`: lists available Gemini models for your API key (ListModels)
   - `GET /api/threads`: lists recent chat threads (dropdown labels are latest timestamps, desc)
-  - `POST /api/dream`: manual Dream run (UI button) that updates some recent pages (titles/tags/kv_tags) per the `dream-prompt` base page, then writes a `dream-diary` page summarising changes
+  - `POST /api/dream`: manual Dream run (UI button) that updates some recent pages (titles/tags/kv_tags) per the `*dream-prompt` base page, then writes a `*dream-diary` page summarising changes
 - **Gemini model selection**
   - UI dropdown populated from `/api/models`
   - Default is `gemini-3-flash-preview` (when available)
 - **Secret blocking**: refuses to save content that looks like a secret (simple heuristics)
 - **Base pages (soft-coded prompts/preferences)**
   - All are just normal pages; behaviour is driven by tags:
-    - `system` (system prompt; most recent wins)
-    - `style`, `bio`, `strategy` (preference base pages; a few recent are concatenated)
-    - `dream-prompt` (dreaming instructions; used by `/api/dream`)
-    - `split-prompt` (reserved for future “split into pages” UX; currently excluded from normal chat injection)
+    - `*system` (system prompt; most recent wins)
+    - `*style`, `*bio`, `*strategy` (preference base pages; a few recent are concatenated)
+    - `*dream-prompt` (dreaming instructions; used by `/api/dream`)
+    - `*split-prompt` (reserved for future “split into pages” UX; currently excluded from normal chat injection)
+- **Behavioral tags + KV tags (current)**
+  - **Plain tags that change behaviour**
+    - `*chat`: marks chat message pages; used for thread listing + UI thread reload/related-by-default.
+    - `*system`: base page for the system prompt; most recent wins; excluded from Dream candidates.
+    - `*style`, `*bio`, `*strategy`, `*habits`, `*preference`: preference base pages injected into chat (recent few concatenated). `*preference` is also excluded from Dream candidates.
+    - `*dream-prompt`: Dream instructions page used by `POST /api/dream`; excluded from normal chat injection and from Dream candidates.
+    - `*split-prompt`: reserved for future “split into pages” UX; excluded from normal chat injection.
+    - `*dream-diary`: pages written by Dreaming to summarise what changed; excluded from Dream candidates.
+  - **KV tags that change behaviour**
+    - `role`: `"user"` / `"assistant"`; used to reconstruct chat roles for Gemini + used by UI to filter chat history.
+    - `thread_title`: used to label threads in the thread dropdown (preferred over page `title` when present).
+    - `source`: set to `"assistant"` on pages created via `enkidu_meta.new_pages` (stored; not otherwise used yet).
+    - `kind` / `updated`: written on Dream diary pages as `{ kind: "dream", updated: <n> }` (stored; not otherwise used yet).
+  - **Model footer meta that changes behaviour**
+    - If the assistant reply ends with a JSON footer containing `enkidu_meta`, the backend consumes:
+      - `suggested_title`, `suggested_tags`, `suggested_kv_tags`, `suggested_thread_title`
+      - `new_pages` (array of pages to create, each with `title`, `content_md`, `tags`, `kv_tags`)
 - **Tag suggestions applied automatically (assistant -> backend)**
   - If assistant replies end with `{\"enkidu_meta\":{...}}`, backend strips it from visible reply and applies:
     - `suggested_title` -> saved assistant page title
-    - `suggested_tags` -> merged into saved assistant page tags (always includes `chat`)
+    - `suggested_tags` -> merged into saved assistant page tags (always includes `*chat`)
     - `suggested_kv_tags` -> merged into saved assistant page kv_tags (forces `role: assistant`)
 - **UI (Bootstrap, single page)**
   - Chat panel with Enter-to-send (Shift+Enter newline), thread dropdown, model dropdown
@@ -94,6 +135,14 @@ Enkidu
   - Recall panel with search, list, edit markdown, preview, save/delete
   - When recall search is empty, recall list auto-populates with “related pages” based on chatbox text (client-side token overlap), with presets: Mixed / Time only / Tags only / Text only
   - Quick-create buttons for base pages: System / Style / Bio / Strategy / Dream prompt / Split prompt
+  - Keyboard shortcuts (only when focus is NOT in a text box):
+    - `Del`: delete current page and any checked Related/Payload pages
+    - `x`: toggle payload checkbox for the current page (in the visible Related list)
+    - `j`: focus/open next page in the visible Related list
+    - `k`: focus/open previous page in the visible Related list
+    - `/`: focus chat input
+    - `t`: focus tag filter
+    - `r`: toggle “Live related”
 
 ## Open questions (decisions we have not made yet)
 
@@ -101,14 +150,14 @@ Enkidu
 - **UI**: keep Bootstrap, or replace with a minimal custom light/dark theme? !!LEAVE IT
 - **Schema**: add `summary`, `prev_page_id`, !!YES reminders, and/or a links table? !!NOT YET
 - **Recall ranking**: current presets exist, but the scoring is still very rough (token overlap + tag overlap + slight recency). Decide if/when to change the weights/heuristics.
-- **Dreaming**: it’s manual (button) and writes a `dream-diary` page; decide the stable JSON output format for the dream model (updates + summary) and the allowed mutation scope (tags only vs titles vs kv_tags).
+- **Dreaming**: it’s manual (button) and writes a `*dream-diary` page; decide the stable JSON output format for the dream model (updates + summary) and the allowed mutation scope (tags only vs titles vs kv_tags).
 - **Offline**: which features must work offline vs read-only vs none. !!NOT YET
 
 ## Next steps (practical increments)
 
-1. **Base pages (formalise)**: define the stable tags + minimal templates for `system`, `style`, `bio`, `strategy`, `dream-prompt`, `split-prompt` (what each should contain, and what it is allowed to do).
-2. **Dreaming prompt content**: write a good `dream-prompt` base page so Dreaming produces reliable JSON updates and a useful diary summary.
-3. **Split prompt UX**: decide how you want to invoke “split into pages” (button? chat instruction?), and wire it to actually use the `split-prompt` base page.
+1. **Base pages (formalise)**: define the stable tags + minimal templates for `*system`, `*style`, `*bio`, `*strategy`, `*dream-prompt`, `*split-prompt` (what each should contain, and what it is allowed to do).
+2. **Dreaming prompt content**: write a good `*dream-prompt` base page so Dreaming produces reliable JSON updates and a useful diary summary.
+3. **Split prompt UX**: decide how you want to invoke “split into pages” (button? chat instruction?), and wire it to actually use the `*split-prompt` base page.
 4. **Embeddings (server-side pgvector)**: implemented. On every page create/update, the backend generates a Gemini embedding and stores it in `public.pages.embedding` (pgvector).
    - Schema: `supabase/schema.sql` enables `vector` and adds `embedding vector(768)` + `embedding_model` + `embedding_updated_at`.
    - Backend: Netlify functions write embeddings on every insert/update that touches `public.pages`.
@@ -122,10 +171,39 @@ Put these in `.env` (or real env vars). See `env.example`.
 - `ENKIDU_ADMIN_TOKEN` (required; keep private)
 - `SUPABASE_URL` (required)
 - `SUPABASE_SERVICE_ROLE_KEY` (required; server-side only; use Supabase \"secret\" key)
+- `SUPABASE_DB_URL` (optional; only needed for `sql_select`; direct Postgres connection string)
 - `GEMINI_API_KEY` (required; server-side only)
 - `GEMINI_MODEL` (optional; default `gemini-3-flash-preview`)
 - `GEMINI_EMBED_MODEL` (optional; default `text-embedding-004`)
 
+
+## Hosting Locally with Netlify CLI
+
+This repo is a static site (`public/`) + Netlify Functions (`netlify/functions/`). The simplest way to run both locally is via the Netlify CLI.
+
+### Requirements
+- Node.js 18+
+- Netlify CLI
+
+### Setup (PowerShell)
+```powershell
+# Install Netlify CLI (one-time)
+npm install -g netlify-cli
+
+# Create local env file (do NOT commit real values)
+Copy-Item env.example .env
+
+# Edit .env and set:
+# ENKIDU_ADMIN_TOKEN, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, GEMINI_API_KEY (and optionally GEMINI_MODEL/GEMINI_EMBED_MODEL)
+notepad .env
+```
+
+### Run
+```powershell
+netlify dev
+```
+
+Then open `http://localhost:8888` (Netlify’s default) and paste the same admin token into the UI.
 
 ## Hosting (Netlify + Supabase) (git-push deploy)
 
@@ -143,9 +221,11 @@ Put these in `.env` (or real env vars). See `env.example`.
   - `GEMINI_API_KEY`
   - `GEMINI_MODEL` (optional)
 
+app is deployed at https://enkidu-agent.netlify.app/  
+
 ### App usage
 - Open the site, paste your admin token into the top-right input, click **Save**.
-- Chat is saved as pages tagged `chat` with `kv_tags.role` set to `user` / `assistant`.
+- Chat is saved as pages tagged `*chat` with `kv_tags.role` set to `user` / `assistant`.
 - Recall lets you search and edit pages as markdown.
 
 ## Not implemented yet (kept as ideas)
@@ -155,3 +235,60 @@ Put these in `.env` (or real env vars). See `env.example`.
 - Graph view (Obsidian-style)
 - Reminders
 - Chrome extension
+
+## Additional Scripts
+
+These live under `scripts/` and are optional helpers for one-off ingestion tasks.
+
+### Clean Raindrop HTML export (remove extra consecutive link rows)
+
+File: `scripts/clean_raindrop_export_links.py`
+
+**Purpose**
+- Raindrop exports are Netscape-bookmark HTML.
+- Sometimes you’ll see multiple consecutive `<DT><A ...>` link rows where you expect a single link followed by `<DD><blockquote ...>` note rows.
+- This script keeps **only the last** link row in any such consecutive run immediately before the following note block.
+
+**Usage (PowerShell)**
+
+```powershell
+python scripts/clean_raindrop_export_links.py "C:/Users/Zoom/Downloads/raindrop_export.html"
+```
+
+**Output**
+- Writes a sibling file: `raindrop_export_cleaned.html` (same folder as the input).
+
+### Import cleaned Raindrop HTML into `public.pages` (one page per link)
+
+File: `scripts/import_raindrop_html_to_pages.mjs`
+
+**What gets created**
+- **1 page per link** (`<DT><A ...>Title</A>`)
+- Page **Title** = the link title
+- Page **Markdown** (`content_md`) =
+  - the markdown link to the URL
+  - followed by **all** `<DD><blockquote ...>` note blocks under that link, concatenated with blank lines
+- Page `kv_tags` always includes:
+  - `source: "raindrop"`
+  - `spaced_repetition: 5`
+
+**Required environment variables**
+- `ENKIDU_BASE_URL` (your deployed site or local dev URL), e.g. `https://enkidu-agent.netlify.app`
+- `ENKIDU_ADMIN_TOKEN` (same token you paste into the UI)
+
+**Optional environment variables**
+- `ENKIDU_ALLOW_SECRETS="1"`
+  - Sends request header `x-enkidu-allow-secrets: 1` so the backend will allow content that trips the secret heuristics (use carefully).
+
+**Usage (PowerShell)**
+
+```powershell
+$env:ENKIDU_BASE_URL="https://enkidu-agent.netlify.app"
+$env:ENKIDU_ADMIN_TOKEN="YOUR_ADMIN_TOKEN"
+$env:ENKIDU_ALLOW_SECRETS="1"
+node scripts/import_raindrop_html_to_pages.mjs "C:/Users/Zoom/Downloads/raindrop_export_cleaned.html"
+```
+
+**De-duping on rerun**
+- The importer sets `kv_tags.raindrop_import_id` deterministically from the URL + concatenated note text, and skips anything already imported.
+- If you imported *before* this `raindrop_import_id` existed, reruns may create duplicates for those older rows; easiest fix is to delete the old Raindrop-imported pages in Recall (filter by KV tags `source=raindrop`) and re-import.

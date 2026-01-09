@@ -14,6 +14,24 @@ function parseLimit(raw) {
   return Math.min(2000, Math.floor(n));
 }
 
+function parseKvValueFromQuery(raw) {
+  // Purpose: match the stored kv_tags JSON types (number/bool/null/string), not just strings.
+  const s = String(raw ?? "").trim();
+  if (!s) return "";
+  if (s === "true") return true;
+  if (s === "false") return false;
+  if (s === "null") return null;
+  if (/^-?\d+(\.\d+)?$/.test(s)) return Number(s);
+  if (s.startsWith("{") || s.startsWith("[") || (s.startsWith('"') && s.endsWith('"'))) {
+    try {
+      return JSON.parse(s);
+    } catch {
+      // fall through to string
+    }
+  }
+  return s;
+}
+
 exports.handler = async (event) => {
   const auth = requireAdmin(event);
   if (!auth.ok) return auth.response;
@@ -59,8 +77,8 @@ exports.handler = async (event) => {
         return { statusCode: 400, body: "kv_key and kv_value must be provided together" };
       }
       if (kvKey && kvValue) {
-        // JSON contains filter (string match on the stored JSON value).
-        const obj = { [String(kvKey)]: String(kvValue) };
+        // JSON contains filter (match on the stored JSON value/type).
+        const obj = { [String(kvKey)]: parseKvValueFromQuery(kvValue) };
         filters.push(`kv_tags=cs.${encodeURIComponent(JSON.stringify(obj))}`);
       }
 

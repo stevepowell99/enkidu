@@ -21,17 +21,7 @@ function $(id) {
   return document.getElementById(id);
 }
 
-async function openPageById(pageId) {
-  // Purpose: load a page into the Recall editor by ID (used by Recall list + chat links).
-  try {
-    setStatus("Loading page...", "secondary");
-    const one = await apiFetch(`/api/page?id=${encodeURIComponent(String(pageId || ""))}`);
-    setSelectedPage(one.page);
-    setStatus("Page loaded.", "success");
-  } catch (e) {
-    setStatus(String(e.message || e), "danger");
-  }
-}
+// NOTE: `openPageById()` is defined later (single canonical definition). Keep only one copy.
 
 // NOTE: keep link handling simple; no special hash routing.
 
@@ -139,8 +129,262 @@ function refreshClearButtons() {
 
 function setStatus(text, kind = "secondary") {
   const el = $("status");
-  el.className = `alert alert-${kind} py-2 small mb-3`;
+  el.className = `alert alert-${kind} py-1 px-2 small mb-0 text-truncate`;
   el.textContent = text;
+}
+
+// -------------------------
+// KV tags builder (UI only; textarea remains the source of truth)
+// -------------------------
+
+let kvTagsBuilderUpdating = false;
+let kvTagsBuilderDebounce = null;
+let kvTagKeyCounts = null; // computed from recent pages: key -> count (for builder key suggestions)
+
+function kvTagsRefreshKeyDatalist() {
+  // Purpose: offer frequent KV keys first, but allow matching any known key while typing.
+  const dl = $("kvTagsKeySuggestions");
+  if (!dl) return;
+  if (!kvTagKeyCounts) {
+    dl.innerHTML = "";
+    return;
+  }
+
+  const keys = Array.from(kvTagKeyCounts.entries())
+    .sort((a, b) => b[1] - a[1])
+    .map(([k]) => k);
+
+  dl.innerHTML = "";
+  for (const k of keys) {
+    const opt = document.createElement("option");
+    opt.value = k;
+    dl.appendChild(opt);
+  }
+}
+
+function kvTagsRefreshValueDatalistForKey(key) {
+  // Purpose: offer frequent values for the selected key first, but allow matching any known value while typing.
+  const dl = $("kvTagsValueSuggestions");
+  if (!dl) return;
+  const k = String(key || "").trim();
+  const stats = k ? kvTagStats?.get(k) : null;
+  const counts = stats?.counts;
+
+  dl.innerHTML = "";
+  if (!counts || !(counts instanceof Map)) return;
+
+  const values = Array.from(counts.entries())
+    .sort((a, b) => b[1] - a[1])
+    .map(([v]) => v)
+    .filter((v) => String(v || "").length); // skip empty suggestions
+
+  for (const v of values) {
+    const opt = document.createElement("option");
+    opt.value = v;
+    dl.appendChild(opt);
+  }
+}
+
+function kvTagsApplySuggestionsToRow(tr) {
+  // Purpose: wire a builder row's key/value inputs to key + per-key value datalists.
+  if (!tr) return;
+  const inputs = tr.querySelectorAll("input");
+  const keyInput = inputs && inputs[0];
+  const valInput = inputs && inputs[1];
+  if (!keyInput || !valInput) return;
+
+  keyInput.setAttribute("list", "kvTagsKeySuggestions");
+  valInput.setAttribute("list", "kvTagsValueSuggestions");
+
+  // Keep the value list in sync with the key for this row.
+  function refreshValues() {
+    kvTagsRefreshValueDatalistForKey((keyInput.value || "").trim());
+  }
+  keyInput.addEventListener("input", refreshValues);
+  keyInput.addEventListener("change", refreshValues);
+  valInput.addEventListener("focus", refreshValues);
+}
+
+function kvTagsValueFromText(raw) {
+  // Purpose: allow quick entry without quotes, while still supporting JSON literals.
+  const s = String(raw ?? "").trim();
+  if (!s) return "";
+  if (s === "true") return true;
+  if (s === "false") return false;
+  if (s === "null") return null;
+  if (/^-?\d+(\.\d+)?$/.test(s)) return Number(s);
+  if (s.startsWith("{") || s.startsWith("[") || (s.startsWith('"') && s.endsWith('"'))) {
+    try {
+      return JSON.parse(s);
+    } catch {
+      // fall through to string
+    }
+  }
+  return String(raw ?? "");
+}
+
+function kvTagsSetMsg(msg) {
+  const el = $("kvTagsBuilderMsg");
+  if (!el) return;
+  el.textContent = msg ? String(msg) : "";
+}
+
+function kvTagsRenderRowsFromObject(obj) {
+  const tbody = $("kvTagsRows");
+  if (!tbody) return;
+  tbody.innerHTML = "";
+
+  for (const [k, v] of Object.entries(obj || {})) {
+    const tr = document.createElement("tr");
+    tr.dataset.kvRow = "1";
+
+    const tdKey = document.createElement("td");
+    const keyInput = document.createElement("input");
+    keyInput.className = "form-control form-control-sm";
+    keyInput.value = String(k);
+    keyInput.placeholder = "key";
+    tdKey.appendChild(keyInput);
+
+    const tdVal = document.createElement("td");
+    const valInput = document.createElement("input");
+    valInput.className = "form-control form-control-sm font-monospace";
+    valInput.value = typeof v === "string" ? v : JSON.stringify(v);
+    valInput.placeholder = "value";
+    tdVal.appendChild(valInput);
+
+    const tdDel = document.createElement("td");
+    const delBtn = document.createElement("button");
+    delBtn.type = "button";
+    delBtn.className = "btn btn-sm btn-outline-danger";
+    delBtn.setAttribute("aria-label", "Delete KV row");
+    delBtn.innerHTML = '<i class="bi bi-x-lg" aria-hidden="true"></i>';
+    tdDel.appendChild(delBtn);
+
+    tr.appendChild(tdKey);
+    tr.appendChild(tdVal);
+    tr.appendChild(tdDel);
+    tbody.appendChild(tr);
+
+    function onEdit() {
+      kvTagsSyncRowsToTextarea();
+    }
+    keyInput.addEventListener("input", onEdit);
+    valInput.addEventListener("input", onEdit);
+    delBtn.addEventListener("click", () => {
+      tr.remove();
+      kvTagsSyncRowsToTextarea();
+    });
+
+    kvTagsApplySuggestionsToRow(tr);
+  }
+}
+
+function kvTagsReadRows() {
+  const rows = [];
+  for (const tr of document.querySelectorAll("#kvTagsRows tr[data-kv-row='1']")) {
+    const inputs = tr.querySelectorAll("input");
+    // Note: avoid optional chaining on array indexing (inputs?.[0]) for broad browser compatibility.
+    const key = ((inputs && inputs[0] && inputs[0].value) || "").trim();
+    const rawVal = inputs && inputs[1] && inputs[1].value != null ? inputs[1].value : "";
+    rows.push({ key, rawVal });
+  }
+  return rows;
+}
+
+function kvTagsSyncRowsToTextarea() {
+  // Purpose: write builder state back into JSON textarea (single source of truth).
+  const ta = $("pageKvTags");
+  if (!ta) return;
+
+  const obj = {};
+  const seen = new Set();
+  const dupes = new Set();
+
+  for (const r of kvTagsReadRows()) {
+    if (!r.key) continue; // ignore empty draft rows
+    if (seen.has(r.key)) dupes.add(r.key);
+    seen.add(r.key);
+    obj[r.key] = kvTagsValueFromText(r.rawVal);
+  }
+
+  kvTagsBuilderUpdating = true;
+  ta.value = JSON.stringify(obj, null, 2);
+  kvTagsBuilderUpdating = false;
+  refreshClearButtons();
+
+  kvTagsSetMsg(dupes.size ? `Duplicate keys: ${Array.from(dupes).join(", ")} (last wins).` : "");
+}
+
+function kvTagsRefreshFromTextarea() {
+  // Purpose: parse textarea JSON and reflect it as editable rows.
+  const ta = $("pageKvTags");
+  if (!ta) return;
+
+  let obj = {};
+  const raw = String(ta.value || "").trim();
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      obj = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+      kvTagsSetMsg("");
+    } catch {
+      kvTagsSetMsg("Invalid JSON in KV tags textbox (builder paused until fixed or overwritten by editing rows).");
+      return; // don't destroy current rows while user is mid-edit in the textarea
+    }
+  } else {
+    kvTagsSetMsg("");
+  }
+
+  kvTagsRenderRowsFromObject(obj);
+}
+
+function initKvTagsBuilder() {
+  // Purpose: wire KV builder to the textarea.
+  if (!$("kvTagsBuilder") || !$("pageKvTags") || !$("kvTagsRows") || !$("kvTagsAddRow")) return;
+
+  // Populate suggestions if we already have stats (e.g., after token saved on a previous session).
+  kvTagsRefreshKeyDatalist();
+
+  $("kvTagsAddRow").addEventListener("click", () => {
+    const tbody = $("kvTagsRows");
+    const tr = document.createElement("tr");
+    tr.dataset.kvRow = "1";
+    tr.innerHTML = `
+      <td><input class="form-control form-control-sm" placeholder="key" /></td>
+      <td><input class="form-control form-control-sm font-monospace" placeholder="value" /></td>
+      <td>
+        <button type="button" class="btn btn-sm btn-outline-danger" aria-label="Delete KV row">
+          <i class="bi bi-x-lg" aria-hidden="true"></i>
+        </button>
+      </td>
+    `;
+    tbody.appendChild(tr);
+
+    const keyInput = tr.querySelectorAll("input")[0];
+    const valInput = tr.querySelectorAll("input")[1];
+    const delBtn = tr.querySelector("button");
+
+    function onEdit() {
+      kvTagsSyncRowsToTextarea();
+    }
+    keyInput.addEventListener("input", onEdit);
+    valInput.addEventListener("input", onEdit);
+    delBtn.addEventListener("click", () => {
+      tr.remove();
+      kvTagsSyncRowsToTextarea();
+    });
+
+    kvTagsApplySuggestionsToRow(tr);
+    keyInput.focus();
+  });
+
+  $("pageKvTags").addEventListener("input", () => {
+    if (kvTagsBuilderUpdating) return;
+    if (kvTagsBuilderDebounce) clearTimeout(kvTagsBuilderDebounce);
+    kvTagsBuilderDebounce = setTimeout(() => kvTagsRefreshFromTextarea(), 150);
+  });
+
+  kvTagsRefreshFromTextarea();
 }
 
 function getToken() {
@@ -301,6 +545,131 @@ function escapeHtml(s) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+// -------------------------
+// Chat bubble helpers (page-id links + JSON collapse)
+// -------------------------
+
+const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+
+function extractUuids(text, { limit = 12 } = {}) {
+  const s = String(text || "");
+  const out = [];
+  const seen = new Set();
+  let m;
+  while ((m = UUID_RE.exec(s))) {
+    const id = String(m[0] || "").toLowerCase();
+    if (!id) continue;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+function linkifyPageIdsInText(container) {
+  // Purpose: turn UUIDs in visible chat text into clickable links to load the RHS page editor.
+  if (!container) return;
+
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, null);
+  const nodes = [];
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) nodes.push(n);
+
+  for (const node of nodes) {
+    const parent = node.parentElement;
+    if (!parent) continue;
+    if (parent.closest("a")) continue; // don't nest links
+
+    const text = node.nodeValue || "";
+    UUID_RE.lastIndex = 0;
+    if (!UUID_RE.test(text)) continue;
+    UUID_RE.lastIndex = 0;
+
+    const frag = document.createDocumentFragment();
+    let last = 0;
+    let m;
+    while ((m = UUID_RE.exec(text))) {
+      const start = m.index;
+      const end = start + m[0].length;
+      if (start > last) frag.appendChild(document.createTextNode(text.slice(last, start)));
+
+      const id = String(m[0] || "");
+      const a = document.createElement("a");
+      a.href = "#";
+      a.className = "enkidu-page-id font-monospace";
+      a.dataset.pageId = id;
+      a.textContent = id;
+      frag.appendChild(a);
+
+      last = end;
+    }
+    if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+    node.parentNode.replaceChild(frag, node);
+  }
+}
+
+function collapseJsonCodeBlocks(container) {
+  // Purpose: replace verbose ```json blocks with a collapsible <details> showing a short summary.
+  if (!container) return;
+  const pres = Array.from(container.querySelectorAll("pre"));
+  for (const pre of pres) {
+    const code = pre.querySelector("code");
+    if (!code) continue;
+
+    const cls = String(code.className || "");
+    const isJson = cls.includes("language-json");
+    if (!isJson) continue;
+
+    const raw = String(code.textContent || "").trim();
+    if (!raw) continue;
+
+    let summaryText = `JSON (${raw.length} chars)`;
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        summaryText = `JSON array (${parsed.length} items)`;
+      } else if (parsed && typeof parsed === "object") {
+        const keys = Object.keys(parsed).slice(0, 6);
+        summaryText = keys.length ? `JSON object (keys: ${keys.join(", ")})` : "JSON object";
+      }
+    } catch {
+      // leave summaryText as length-based
+    }
+
+    const ids = extractUuids(raw, { limit: 8 });
+
+    const oldParent = pre.parentNode;
+    if (!oldParent) continue;
+
+    const details = document.createElement("details");
+    details.className = "enkidu-json-details";
+
+    const summary = document.createElement("summary");
+    summary.className = "enkidu-json-summary";
+    summary.appendChild(document.createTextNode(summaryText));
+
+    if (ids.length) {
+      const wrap = document.createElement("span");
+      wrap.className = "ms-2";
+      wrap.appendChild(document.createTextNode("Open: "));
+      for (const id of ids) {
+        const a = document.createElement("a");
+        a.href = "#";
+        a.className = "enkidu-page-id badge text-bg-light border ms-1";
+        a.dataset.pageId = id;
+        a.textContent = id.slice(0, 8);
+        wrap.appendChild(a);
+      }
+      summary.appendChild(wrap);
+    }
+
+    // Replace the original <pre> with <details>, then move the <pre> inside the <details>.
+    oldParent.replaceChild(details, pre);
+    details.appendChild(summary);
+    details.appendChild(pre);
+  }
 }
 
 function preprocessWikilinks(md) {
@@ -557,11 +926,26 @@ function updateTagSuggestionsFromPages(pages, { limit = 15 } = {}) {
   const dl = $("tagSuggestions");
   if (!dl) return;
 
+  // Always pin the "behavioral" tags at the top (these are real tags stored on pages).
+  const pinned = [
+    "*chat",
+    "*system",
+    "*style",
+    "*bio",
+    "*strategy",
+    "*habits",
+    "*preference",
+    "*dream-prompt",
+    "*split-prompt",
+    "*dream-diary",
+  ];
+
   const counts = new Map(); // tag -> count
   for (const p of pages || []) {
     for (const t of p?.tags || []) {
       const tag = String(t).trim();
       if (!tag) continue;
+      if (pinned.includes(tag)) continue; // already shown at the top
       counts.set(tag, (counts.get(tag) || 0) + 1);
     }
   }
@@ -572,11 +956,21 @@ function updateTagSuggestionsFromPages(pages, { limit = 15 } = {}) {
     .map(([tag]) => tag);
 
   dl.innerHTML = "";
+  for (const tag of pinned) {
+    const opt = document.createElement("option");
+    opt.value = tag;
+    dl.appendChild(opt);
+  }
   for (const tag of top) {
     const opt = document.createElement("option");
     opt.value = tag;
     dl.appendChild(opt);
   }
+}
+
+function normalizeTagFilter(raw) {
+  // Purpose: accept a single tag filter exactly as typed.
+  return String(raw || "").trim();
 }
 
 function tokenize(text) {
@@ -630,6 +1024,9 @@ function updateKvKeySuggestionsFromPages(pages, { limit = 20 } = {}) {
     }
     kvTagStats.set(key, { topValue, counts: m });
   }
+
+  kvTagKeyCounts = keyCounts;
+  kvTagsRefreshKeyDatalist();
 
   const topKeys = Array.from(keyCounts.entries())
     .sort((a, b) => b[1] - a[1])
@@ -699,29 +1096,133 @@ function updatePayloadCount() {
 
 let selectedPageId = null;
 let isEditingMarkdown = false; // merged markdown+preview: preview by default when non-empty
+let autosaveDebounce = null;
+let suppressAutosave = false; // Purpose: avoid autosave when we programmatically fill fields.
+let lastSavedPayloadJson = null; // Purpose: avoid saving when nothing changed.
+let previewClickTimer = null; // Purpose: single-click opens modal; double-click edits (cancel timer).
+
+function openPreviewModal() {
+  // Purpose: show the rendered preview in a large modal (workaround for tricky scroll sizing).
+  const modal = $("enkiduPreviewModal");
+  const body = $("enkiduPreviewModalBody");
+  const title = $("enkiduPreviewModalTitle");
+  if (!modal || !body) return;
+
+  if (title) title.textContent = ($("pageTitle")?.value || "").trim() || "Preview";
+  body.innerHTML = $("pagePreview")?.innerHTML || "";
+  modal.classList.remove("d-none");
+  modal.setAttribute("aria-hidden", "false");
+}
+
+function closePreviewModal() {
+  const modal = $("enkiduPreviewModal");
+  const body = $("enkiduPreviewModalBody");
+  if (!modal) return;
+  modal.classList.add("d-none");
+  modal.setAttribute("aria-hidden", "true");
+  if (body) body.innerHTML = "";
+}
+
+function buildRecallPayloadFromUi() {
+  // Purpose: compute the payload we'd save for the currently visible Recall editor fields.
+  let kv_tags = {};
+  try {
+    const raw = ($("pageKvTags").value || "").trim();
+    kv_tags = raw ? JSON.parse(raw) : {};
+  } catch {
+    throw new Error("KV tags must be valid JSON");
+  }
+  if (!kv_tags || typeof kv_tags !== "object" || Array.isArray(kv_tags)) {
+    throw new Error("KV tags must be a JSON object");
+  }
+
+  return {
+    title: $("pageTitle").value || null,
+    tags: parseTags($("pageTags").value),
+    content_md: $("pageContent").value || "",
+    kv_tags,
+  };
+}
+
+function isPayloadEmpty(payload) {
+  // Purpose: avoid auto-creating totally empty pages.
+  const hasTitle = !!String(payload?.title || "").trim();
+  const hasTags = Array.isArray(payload?.tags) && payload.tags.length > 0;
+  const hasContent = !!String(payload?.content_md || "").trim();
+  const hasKv =
+    payload?.kv_tags && typeof payload.kv_tags === "object" && !Array.isArray(payload.kv_tags) && Object.keys(payload.kv_tags).length > 0;
+  return !(hasTitle || hasTags || hasContent || hasKv);
+}
+
+function scheduleAutosave() {
+  // Purpose: debounced autosave for Recall editor fields (no Save button).
+  if (suppressAutosave) return;
+  if (!getToken()) return;
+
+  if (autosaveDebounce) clearTimeout(autosaveDebounce);
+  autosaveDebounce = setTimeout(() => {
+    autosaveDebounce = null;
+    autosaveNow().catch((e) => setStatus(String(e.message || e), "danger"));
+  }, 800);
+}
+
+async function autosaveNow() {
+  if (suppressAutosave) return;
+  let payload;
+  try {
+    payload = buildRecallPayloadFromUi();
+  } catch {
+    // Invalid KV JSON (etc): don't autosave until user fixes it.
+    return;
+  }
+  if (!selectedPageId && isPayloadEmpty(payload)) return;
+
+  const payloadJson = JSON.stringify(payload);
+  if (payloadJson === lastSavedPayloadJson) return;
+
+  await savePage({ reason: "autosave" });
+  try {
+    lastSavedPayloadJson = JSON.stringify(buildRecallPayloadFromUi());
+  } catch {
+    lastSavedPayloadJson = null;
+  }
+}
 
 function renderPreview() {
   const md = $("pageContent").value || "";
-  $("pagePreview").innerHTML = window.marked ? window.marked.parse(preprocessWikilinks(md)) : md;
+  const el = $("pagePreview");
+  if (!el) return;
+  el.innerHTML = window.marked ? window.marked.parse(preprocessWikilinks(md)) : md;
+  // Apply the same readability improvements as chat bubbles.
+  collapseJsonCodeBlocks(el);
+  linkifyPageIdsInText(el);
 }
 
 function syncMarkdownWidget() {
   // Purpose: merge editor + preview. If non-empty and not editing => show preview; else show editor.
   const md = $("pageContent").value || "";
   const hasMd = !!md.trim();
+  const mdWrap = document.querySelector(".enkidu-md-wrap");
+  const previewWrap = document.querySelector(".enkidu-preview-wrap");
 
   if (!isEditingMarkdown && hasMd) {
     renderPreview();
     $("pageContent").style.display = "none";
     $("pagePreview").style.display = "block";
+    if (mdWrap) mdWrap.style.display = "none";
+    if (previewWrap) previewWrap.style.display = "flex";
   } else {
     // Show editor (empty pages start here; double-click switches here).
     $("pageContent").style.display = "block";
     $("pagePreview").style.display = "none";
+    if (mdWrap) mdWrap.style.display = "flex";
+    if (previewWrap) previewWrap.style.display = "none";
   }
+
 }
 
 function setSelectedPage(page) {
+  suppressAutosave = true;
   selectedPageId = page?.id || null;
   $("pageId").textContent = selectedPageId || "(none)";
   $("pageTitle").value = page?.title || "";
@@ -731,6 +1232,26 @@ function setSelectedPage(page) {
   isEditingMarkdown = false;
   syncMarkdownWidget();
   refreshClearButtons();
+  kvTagsRefreshFromTextarea();
+  try {
+    lastSavedPayloadJson = JSON.stringify(buildRecallPayloadFromUi());
+  } catch {
+    lastSavedPayloadJson = null;
+  }
+  suppressAutosave = false;
+  updateRecallCurrentHighlight();
+}
+
+function updateRecallCurrentHighlight() {
+  // Purpose: visually mark the "current" page in the Related/Recall list (for j/k navigation).
+  const root = $("recallResults");
+  if (!root) return;
+  for (const btn of root.querySelectorAll("button[data-open-page-id]")) {
+    const isCurrent = selectedPageId && btn.dataset.openPageId === selectedPageId;
+    btn.classList.toggle("btn-primary", !!isCurrent);
+    btn.classList.toggle("text-white", !!isCurrent);
+    btn.classList.toggle("btn-light", !isCurrent);
+  }
 }
 
 function renderRecallResults(pages) {
@@ -794,7 +1315,10 @@ function renderRecallResults(pages) {
 
     const btn = document.createElement("button");
     btn.type = "button";
-    btn.className = "btn btn-sm btn-light w-100 text-start";
+    // Purpose: show the current page (selectedPageId) distinctly using Bootstrap styles.
+    const isCurrent = selectedPageId && p.id === selectedPageId;
+    btn.className = `btn btn-sm ${isCurrent ? "btn-primary text-white" : "btn-light"} w-100 text-start`;
+    btn.dataset.openPageId = p.id;
 
     const title = p.title || (p.content_md || "").slice(0, 80) || "(untitled)";
     const when = p.created_at ? new Date(p.created_at).toLocaleString() : "";
@@ -816,10 +1340,11 @@ function renderRecallResults(pages) {
   }
 
   updateRelatedToggleLabel();
+  updateRecallCurrentHighlight();
 }
 
 async function recallSearch() {
-  const tag = ($("recallTag").value || "").trim();
+  const tag = normalizeTagFilter(($("recallTag").value || "").trim());
   const kvKey = ($("recallKvKey")?.value || "").trim();
   const kvValue = ($("recallKvValue")?.value || "").trim();
   const draft = ($("chatInput")?.value || "").trim();
@@ -865,13 +1390,28 @@ async function recallSearch() {
   // If there is no chat text yet, just show recent assistant chat pages.
   if (!chatText) {
     const pages = await ensureRecentPagesCache();
+    if (matchers.time) {
+      // If Time is enabled and there is no draft/search, show the most recent pages overall.
+      // (Cache is already ordered by created_at desc via /api/pages.)
+      const recent = (pages || []).slice(0, 50).map((p) => ({
+        ...p,
+        _enkidu_rel: { kind: "heuristic", score: p?.created_at ? new Date(p.created_at).getTime() : 0, textScore: 0 },
+      }));
+      renderRecallResults(recent);
+      setStatus(`Related: showing ${recent.length} most recent pages.`, "success");
+      dbg("recallSearch:related:emptyDraft", { requestSeq, mode: "time", recent: recent.length });
+      return;
+    }
+
+    // Otherwise, keep the older behavior: show recent chat pages.
     const candidates = pages.filter(
-      (p) => (p?.kv_tags?.role === "assistant" || p?.kv_tags?.role === "user") && (p?.tags || []).includes("chat")
+      (p) =>
+        (p?.kv_tags?.role === "assistant" || p?.kv_tags?.role === "user") && (p?.tags || []).includes("*chat")
     );
     const recent = candidates.slice(0, 50);
     renderRecallResults(recent);
-    setStatus(`Related: showing ${recent.length} recent answers.`, "success");
-    dbg("recallSearch:related:emptyDraft", { requestSeq, recent: recent.length });
+    setStatus(`Related: showing ${recent.length} recent chat pages.`, "success");
+    dbg("recallSearch:related:emptyDraft", { requestSeq, mode: "chat", recent: recent.length });
     return;
   }
 
@@ -903,16 +1443,12 @@ async function recallSearch() {
   // Candidate set:
   // - By default, keep this focused on chat history (so Related behaves like "similar past chats").
   // - If Title matching is enabled, widen to *all* pages (so you can match titles of notes/base pages),
-  //   but still skip prompt cards that are operational.
+  //   and include everything (no tag-based exclusion).
   const candidates = matchers.title
-    ? pages.filter((p) => {
-        const tags = p?.tags || [];
-        if (tags.includes("dream-prompt")) return false;
-        if (tags.includes("split-prompt")) return false;
-        return true;
-      })
+    ? pages
     : pages.filter(
-        (p) => (p?.kv_tags?.role === "assistant" || p?.kv_tags?.role === "user") && (p?.tags || []).includes("chat")
+        (p) =>
+          (p?.kv_tags?.role === "assistant" || p?.kv_tags?.role === "user") && (p?.tags || []).includes("*chat")
       );
   dbg("recallSearch:candidates", {
     requestSeq,
@@ -995,7 +1531,7 @@ async function recallSearch() {
   }
 }
 
-async function savePage() {
+async function savePage({ reason = "manual" } = {}) {
   let kv_tags = {};
   try {
     const raw = ($("pageKvTags").value || "").trim();
@@ -1014,12 +1550,22 @@ async function savePage() {
     kv_tags,
   };
 
-  setStatus("Saving...", "secondary");
+  setStatus(reason === "autosave" ? "Autosaving..." : "Saving...", "secondary");
 
   if (!selectedPageId) {
     const data = await apiFetch("/api/pages", { method: "POST", body: payload });
-    setSelectedPage(data.page);
-    setStatus("Created.", "success");
+    if (reason === "autosave") {
+      // Purpose: autosave should not "refresh" the editor by re-filling inputs.
+      // Just attach the new page id so further autosaves become updates.
+      selectedPageId = data?.page?.id || null;
+      $("pageId").textContent = selectedPageId || "(none)";
+      if (reason === "autosave") setStatus("Autosaved (created).", "success");
+      else setStatus("Saved (created).", "success");
+    } else {
+      setSelectedPage(data.page);
+      setStatus("Saved (created).", "success");
+    }
+    recentPagesCache = null; // drop cache so Related + tag suggestions reflect new/updated pages
     await recallSearch();
     return;
   }
@@ -1028,8 +1574,14 @@ async function savePage() {
     method: "PUT",
     body: payload,
   });
-  setSelectedPage(data.page);
-  setStatus("Saved.", "success");
+  if (reason === "autosave") {
+    // Purpose: keep user on the existing page; don't overwrite textboxes during autosave.
+    setStatus("Autosaved.", "success");
+  } else {
+    setSelectedPage(data.page);
+    setStatus("Saved.", "success");
+  }
+  recentPagesCache = null; // drop cache so Related + tag suggestions reflect new/updated pages
   await recallSearch();
 }
 
@@ -1079,9 +1631,14 @@ function renderChatLog(pages) {
     const body = document.createElement("div");
     // Purpose: assistant replies are Markdown; render as HTML for readability.
     // NOTE: this renders HTML produced by `marked` (treat assistant content as untrusted).
-    if (role === "assistant" && window.marked)
+    if (role === "assistant" && window.marked) {
       body.innerHTML = window.marked.parse(preprocessWikilinks(p.content_md || ""));
-    else body.textContent = p.content_md || "";
+      collapseJsonCodeBlocks(body);
+      linkifyPageIdsInText(body);
+    } else {
+      body.textContent = p.content_md || "";
+      linkifyPageIdsInText(body);
+    }
 
     div.appendChild(head);
     div.appendChild(body);
@@ -1100,7 +1657,7 @@ async function reloadThread() {
   }
 
   setStatus("Loading thread...", "secondary");
-  const data = await apiFetch(`/api/pages?limit=100&thread_id=${encodeURIComponent(threadId)}&tag=chat`);
+  const data = await apiFetch(`/api/pages?limit=100&thread_id=${encodeURIComponent(threadId)}&tag=*chat`);
   renderChatLog(data.pages);
   setStatus(`Loaded ${data.pages?.length || 0} messages.`, "success");
 }
@@ -1159,6 +1716,7 @@ function newThread() {
 
 function init() {
   initClearButtons();
+  initKvTagsBuilder();
   $("adminToken").value = getToken();
   refreshClearButtons();
   updatePayloadCount();
@@ -1256,13 +1814,20 @@ function init() {
     }
     sel.value = "";
   });
-  $("savePage").onclick = () => savePage().catch((e) => setStatus(e.message, "danger"));
+  // Save button removed; Recall editor uses debounced autosave.
   $("deletePage").onclick = () => deletePage().catch((e) => setStatus(e.message, "danger"));
+  $("pageTitle")?.addEventListener("input", scheduleAutosave);
+  $("pageTags")?.addEventListener("input", scheduleAutosave);
+  $("pageKvTags")?.addEventListener("input", () => {
+    kvTagsRefreshFromTextarea();
+    scheduleAutosave();
+  });
   $("pageContent").addEventListener("input", () => {
     // While editing, keep preview up-to-date (even if hidden).
     renderPreview();
     // Wikilink picker in markdown editor.
     openOrUpdateWikilinkPicker($("pageContent")).catch(() => {});
+    scheduleAutosave();
   });
   $("pageContent").addEventListener("keydown", handleWikilinkKeydown);
   $("pageContent").addEventListener("blur", () => {
@@ -1273,6 +1838,7 @@ function init() {
   });
   $("pagePreview").addEventListener("dblclick", () => {
     // Enter edit mode on double-click.
+    if (previewClickTimer) clearTimeout(previewClickTimer);
     isEditingMarkdown = true;
     syncMarkdownWidget();
     $("pageContent").focus();
@@ -1305,12 +1871,52 @@ function init() {
 
   // Click wikilinks in previews/chat to open pages.
   $("pagePreview")?.addEventListener("click", (e) => {
+    const idLink = e.target?.closest?.("a.enkidu-page-id");
+    if (idLink) {
+      e.preventDefault();
+      e.stopPropagation();
+      openPageById(idLink.dataset.pageId).catch((err) => setStatus(err.message, "danger"));
+      return;
+    }
     const a = e.target?.closest?.("a.enkidu-wikilink");
-    if (!a) return;
-    e.preventDefault();
-    openPageByTitle(a.dataset.wikilinkTitle).catch((err) => setStatus(err.message, "danger"));
+    if (a) {
+      e.preventDefault();
+      openPageByTitle(a.dataset.wikilinkTitle).catch((err) => setStatus(err.message, "danger"));
+      return;
+    }
+
+    // Single click opens modal; delay so dblclick can cancel it.
+    if (previewClickTimer) clearTimeout(previewClickTimer);
+    previewClickTimer = setTimeout(() => {
+      previewClickTimer = null;
+      openPreviewModal();
+    }, 240);
+  });
+  $("enkiduPreviewModalBody")?.addEventListener("click", (e) => {
+    const idLink = e.target?.closest?.("a.enkidu-page-id");
+    if (idLink) {
+      e.preventDefault();
+      e.stopPropagation();
+      openPageById(idLink.dataset.pageId).catch((err) => setStatus(err.message, "danger"));
+      return;
+    }
+    const a = e.target?.closest?.("a.enkidu-wikilink");
+    if (a) {
+      e.preventDefault();
+      e.stopPropagation();
+      openPageByTitle(a.dataset.wikilinkTitle).catch((err) => setStatus(err.message, "danger"));
+      return;
+    }
   });
   $("chatLog")?.addEventListener("click", (e) => {
+    const idLink = e.target?.closest?.("a.enkidu-page-id");
+    if (idLink) {
+      e.preventDefault();
+      e.stopPropagation(); // avoid toggling <details> when clicking page-id chips in <summary>
+      openPageById(idLink.dataset.pageId).catch((err) => setStatus(err.message, "danger"));
+      return;
+    }
+
     const a = e.target?.closest?.("a.enkidu-wikilink");
     if (!a) return;
     e.preventDefault();
@@ -1321,6 +1927,94 @@ function init() {
     if (wikilinkPicker?.open) {
       const el = $(wikilinkPicker.targetId);
       if (el) positionPickerNearEl(el);
+    }
+  });
+
+  // Preview modal close wiring.
+  $("enkiduPreviewModalClose")?.addEventListener("click", () => closePreviewModal());
+  $("enkiduPreviewModal")?.addEventListener("click", (e) => {
+    // Click outside closes (backdrop only).
+    if (e.target?.id === "enkiduPreviewModal") closePreviewModal();
+  });
+  document.addEventListener("keydown", (e) => {
+    // Global keyboard shortcuts (only when NOT typing in a text box).
+    const modal = $("enkiduPreviewModal");
+
+    // Escape: close the preview modal (regardless of focus).
+    if (e.key === "Escape") {
+      if (modal && !modal.classList.contains("d-none")) closePreviewModal();
+      return;
+    }
+
+    // If another handler already consumed this key, do nothing.
+    if (e.defaultPrevented) return;
+
+    // Only fire these shortcuts when focus isn't in a text entry control.
+    const active = document.activeElement;
+    const isTyping =
+      isTextEntryControl(active) ||
+      !!active?.isContentEditable ||
+      !!active?.closest?.("[contenteditable='true']");
+    if (isTyping) return;
+
+    // Avoid colliding with browser/app shortcuts.
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+    async function openAdjacentVisiblePage(delta) {
+      // Purpose: j/k navigate the currently visible Recall list.
+      const ids = getVisibleRecallIds();
+      if (!ids.length) return;
+      let idx = selectedPageId ? ids.indexOf(selectedPageId) : -1;
+      if (idx === -1) idx = delta > 0 ? -1 : ids.length;
+      const nextIdx = idx + delta;
+      if (nextIdx < 0 || nextIdx >= ids.length) return;
+      await openPageById(ids[nextIdx]);
+    }
+
+    if (e.key === "Delete" || e.key === "y") {
+      e.preventDefault();
+      deletePage().catch((err) => setStatus(err.message, "danger"));
+      return;
+    }
+    if (e.key === "j") {
+      e.preventDefault();
+      openAdjacentVisiblePage(+1).catch((err) => setStatus(err.message, "danger"));
+      return;
+    }
+    if (e.key === "k") {
+      e.preventDefault();
+      openAdjacentVisiblePage(-1).catch((err) => setStatus(err.message, "danger"));
+      return;
+    }
+    if (e.key === "/" && !e.shiftKey) {
+      e.preventDefault();
+      $("chatInput")?.focus();
+      return;
+    }
+    if (e.key === "t") {
+      e.preventDefault();
+      $("recallTag")?.focus();
+      return;
+    }
+    if (e.key === "x") {
+      // Purpose: toggle the payload checkbox for the currently open page (if visible in Related).
+      e.preventDefault();
+      if (!selectedPageId) return;
+      const root = $("recallResults");
+      const cb = root?.querySelector?.(`input[type="checkbox"][data-page-id="${selectedPageId}"]`);
+      if (!cb) return;
+      cb.checked = !cb.checked;
+      cb.dispatchEvent(new Event("change", { bubbles: true }));
+      return;
+    }
+    if (e.key === "r") {
+      // Purpose: quick toggle for Live related (uses existing change wiring + persistence).
+      e.preventDefault();
+      const el = $("liveRelated");
+      if (!el) return;
+      el.checked = !el.checked;
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+      return;
     }
   });
   $("reloadChat").onclick = () => reloadThread().catch((e) => setStatus(e.message, "danger"));
@@ -1335,8 +2029,6 @@ function init() {
     recallSearch().catch(() => {});
   };
   $("runDream").onclick = () => runDream().catch((e) => setStatus(e.message, "danger"));
-  $("runBackfillEmbeddings").onclick = () =>
-    runBackfillEmbeddings().catch((e) => setStatus(e.message, "danger"));
 
   $("adminToken").addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
@@ -1369,6 +2061,7 @@ function init() {
     $("pageTitle").value = title;
     $("pageTags").value = Array.from(new Set([...parseTags($("pageTags").value), "clip", "web"])).join(", ");
     $("pageKvTags").value = JSON.stringify({ source_url: url }, null, 2);
+    kvTagsRefreshFromTextarea();
 
     const quote = text
       ? `> ${text.trim().replace(/\n/g, "\n> ")}\n\n`
@@ -1401,6 +2094,7 @@ function init() {
     loadThreads().catch(() => {});
     ensureRecentPagesCache().catch(() => {});
   }
+
 }
 
 async function loadModels() {
@@ -1446,17 +2140,6 @@ async function runDream() {
     data && typeof data === "object"
       ? `Dream done. Candidates ${data.candidates ?? "?"}, proposed ${data.proposed ?? "?"}, updated ${data.updated ?? 0}. Diary: ${data.diaryPageId || "(none)"}.`
       : "Dream done.";
-  setStatus(msg, "success");
-}
-
-async function runBackfillEmbeddings() {
-  // Purpose: backfill embeddings for existing pages in small batches (admin-only).
-  setStatus("Backfilling embeddings (batch)...", "secondary");
-  const data = await apiFetch("/api/backfill-embeddings?limit=25", { method: "POST" });
-  const msg =
-    data && typeof data === "object"
-      ? `Backfill done. Updated ${data.updated ?? 0}/${data.scanned ?? "?"}. ${data.remaining_hint || ""}`
-      : "Backfill done.";
   setStatus(msg, "success");
 }
 

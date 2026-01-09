@@ -15,10 +15,11 @@ exports.handler = async (event) => {
   try {
     // Fetch a window of recent chat pages and aggregate by thread_id.
     // Keeps it dependency-free and avoids RPC/setup complexity.
+    const CHAT_TAG = "*chat";
     const rows = await supabaseRequest("pages", {
       query:
         "?select=thread_id,created_at,title,kv_tags" +
-        "&tags=cs.{chat}" +
+        `&tags=cs.{${encodeURIComponent(CHAT_TAG)}}` +
         "&order=created_at.desc" +
         "&limit=2000",
     });

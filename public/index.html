@@ -22,32 +22,36 @@
     <link rel="stylesheet" href="/app.css" />
   </head>
   <body class="bg-light">
-    <main class="container-fluid py-3">
+    <main class="container-fluid py-3 enkidu-app">
       <!-- Top bar -->
-      <div class="row g-3 align-items-end mb-2">
-        <div class="col">
-          <h1 class="h4 mb-0">Enkidu</h1>
-          <div class="text-secondary small">Chat + recall (Supabase Postgres + Netlify Functions + Gemini)</div>
+      <div id="topBar" class="d-flex flex-wrap align-items-center gap-3 mb-2">
+        <h1 class="h4 mb-0">Enkidu</h1>
+
+        <div
+          id="status"
+          class="alert alert-secondary py-1 px-2 small mb-0 text-truncate"
+          style="max-width: 52rem"
+          role="status"
+        >
+          Not connected yet.
         </div>
-        <div class="col-auto">
-          <label class="form-label small mb-1" for="adminToken">Admin token</label>
-          <div class="input-group">
-            <input id="adminToken" class="form-control form-control-sm" type="password" placeholder="ENKIDU_ADMIN_TOKEN" />
-            <button id="saveToken" class="btn btn-sm btn-primary" type="button">Save</button>
-          </div>
-          <div class="form-check form-switch mt-1">
+
+        <div class="d-flex flex-wrap align-items-center gap-2 ms-auto">
+          <div class="form-check form-switch mb-0">
             <input class="form-check-input" type="checkbox" role="switch" id="allowSecrets" />
             <label class="form-check-label small" for="allowSecrets">Allow suspected secrets (override)</label>
           </div>
+
+          <div class="input-group input-group-sm" style="width: 26rem">
+            <span class="input-group-text">Admin token</span>
+            <input id="adminToken" class="form-control" type="password" placeholder="ENKIDU_ADMIN_TOKEN" />
+            <button id="saveToken" class="btn btn-primary" type="button">Save</button>
+          </div>
         </div>
       </div>
 
-      <div id="status" class="alert alert-secondary py-2 small mb-3" role="status">
-        Not connected yet.
-      </div>
-
       <!-- Two-panel layout -->
-      <div class="row g-3">
+      <div class="row g-3 enkidu-main-row">
         <!-- Chat panel -->
         <div class="col-12 col-lg-6">
           <div class="card h-100 enkidu-chat-card">
@@ -57,7 +61,6 @@
                 <span class="badge text-bg-secondary" id="payloadCount" title="Selected recall pages to include in the next chat request">Payload: 0</span>
                 <button id="clearPayload" class="btn btn-sm btn-outline-secondary" type="button">Clear</button>
                 <button id="runDream" class="btn btn-sm btn-outline-secondary" type="button">Dream</button>
-                <button id="runBackfillEmbeddings" class="btn btn-sm btn-outline-secondary" type="button">Backfill embeddings</button>
                 <div class="form-check form-switch ms-1">
                   <input class="form-check-input" type="checkbox" role="switch" id="useWebSearch" />
                   <label class="form-check-label small" for="useWebSearch">Web search</label>
@@ -94,7 +97,7 @@
 
         <!-- Recall panel -->
         <div class="col-12 col-lg-6">
-          <div class="card h-100">
+          <div class="card h-100 enkidu-recall-card">
             <div class="card-header d-flex gap-2 align-items-center">
               <div class="fw-semibold">Recall</div>
               <div class="ms-auto d-flex gap-2 align-items-center">
@@ -145,9 +148,6 @@
                     <button id="newPage" class="btn btn-sm btn-outline-secondary" type="button" title="New page" aria-label="New page">
                       <i class="bi bi-file-earmark-plus"></i>
                     </button>
-                    <button id="savePage" class="btn btn-sm btn-primary" type="button" title="Save" aria-label="Save">
-                      <i class="bi bi-save"></i>
-                    </button>
                     <button id="deletePage" class="btn btn-sm btn-outline-danger" type="button" title="Delete" aria-label="Delete">
                       <i class="bi bi-trash"></i>
                     </button>
@@ -164,32 +164,56 @@
                       <input id="pageTags" class="form-control" placeholder="e.g. style, preference" />
                       <select id="pageTagPreset" class="form-select w-auto" style="max-width: 12rem" title="Add preset tags">
                         <option value="">(add preset tags…)</option>
-                        <option value="system,preference">System base page</option>
-                        <option value="style,preference">Style base page</option>
-                        <option value="bio,preference">Bio base page</option>
-                        <option value="strategy,preference">Strategy base page</option>
-                        <option value="dream-prompt,preference">Dream base page</option>
-                        <option value="split-prompt,preference">Split base page</option>
+                        <option value="*system,*preference">System base page</option>
+                        <option value="*style,*preference">Style base page</option>
+                        <option value="*bio,*preference">Bio base page</option>
+                        <option value="*strategy,*preference">Strategy base page</option>
+                        <option value="*dream-prompt,*preference">Dream base page</option>
+                        <option value="*split-prompt,*preference">Split base page</option>
                       </select>
                     </div>
                   </div>
 
                   <div class="mb-2">
                     <label class="form-label small mb-1" for="pageKvTags">KV tags (JSON)</label>
+                    <!-- Purpose: KV tags builder (easy add/edit/delete). Textarea remains the source of truth (backend unchanged). -->
+                    <div id="kvTagsBuilder" class="border rounded p-2 bg-white mb-1">
+                      <div class="d-flex align-items-center gap-2 mb-1">
+                        <div class="small text-secondary">Builder</div>
+                        <button id="kvTagsAddRow" class="btn btn-sm btn-outline-secondary ms-auto" type="button">Add</button>
+                      </div>
+                      <div class="table-responsive">
+                        <table class="table table-sm mb-1 align-middle">
+                          <thead>
+                            <tr class="small text-secondary">
+                              <th style="width: 35%">Key</th>
+                              <th>Value</th>
+                              <th style="width: 1%"></th>
+                            </tr>
+                          </thead>
+                          <tbody id="kvTagsRows"></tbody>
+                        </table>
+                      </div>
+                      <div id="kvTagsBuilderMsg" class="small text-danger"></div>
+                    </div>
+                    <!-- Purpose: KV builder suggestions (keys + per-key values). -->
+                    <datalist id="kvTagsKeySuggestions"></datalist>
+                    <datalist id="kvTagsValueSuggestions"></datalist>
                     <textarea
                       id="pageKvTags"
                       class="form-control form-control-sm font-monospace"
                       rows="2"
                       placeholder='e.g. {"role":"assistant","kind":"note"}'
                     ></textarea>
+                    <div class="form-text small">Tip: values can be plain text (saved as strings) or JSON literals like <span class="font-monospace">true</span>, <span class="font-monospace">123</span>, <span class="font-monospace">{"x":1}</span>.</div>
                   </div>
 
-                  <div class="mb-2">
+                  <div class="mb-2 enkidu-md-wrap">
                     <label class="form-label small mb-1" for="pageContent">Markdown</label>
                     <textarea id="pageContent" class="form-control" rows="10"></textarea>
                   </div>
 
-                  <div class="mb-2">
+                  <div class="mb-2 enkidu-preview-wrap">
                     <label class="form-label small mb-1">Rendered (double-click to edit)</label>
                     <div id="pagePreview" class="border rounded p-2 bg-white enkidu-preview"></div>
                   </div>
@@ -218,6 +242,19 @@
           <div class="ms-auto small text-secondary font-monospace" id="wikilinkPickerQuery"></div>
         </div>
         <div id="wikilinkPickerList" class="list-group list-group-flush"></div>
+      </div>
+    </div>
+
+    <!-- Preview modal (no Bootstrap JS; simple overlay) -->
+    <div id="enkiduPreviewModal" class="enkidu-modal-backdrop d-none" aria-hidden="true">
+      <div class="card shadow enkidu-modal-panel" role="dialog" aria-modal="true" aria-label="Preview modal">
+        <div class="card-header py-2 d-flex align-items-center gap-2">
+          <div class="fw-semibold text-truncate" id="enkiduPreviewModalTitle">Preview</div>
+          <button id="enkiduPreviewModalClose" type="button" class="btn btn-sm btn-outline-secondary ms-auto" aria-label="Close">
+            <i class="bi bi-x-lg" aria-hidden="true"></i>
+          </button>
+        </div>
+        <div class="card-body enkidu-modal-body" id="enkiduPreviewModalBody"></div>
       </div>
     </div>
 

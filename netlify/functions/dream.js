@@ -43,11 +43,11 @@ async function loadCandidates(limit) {
   for (const r of rows || []) {
     const tags = r?.tags || [];
     const isPromptCard =
-      tags.includes("dream-prompt") ||
-      tags.includes("split-prompt") ||
-      tags.includes("system") ||
-      tags.includes("preference");
-    const isDreamDiary = tags.includes("dream-diary");
+      tags.includes("*dream-prompt") ||
+      tags.includes("*split-prompt") ||
+      tags.includes("*system") ||
+      tags.includes("*preference");
+    const isDreamDiary = tags.includes("*dream-diary");
     if (isPromptCard || isDreamDiary) continue;
 
     out.push(r);
@@ -58,14 +58,14 @@ async function loadCandidates(limit) {
 
 async function loadDreamPrompt() {
   // Dreaming prompt instructions live in a page, not hardcoded.
-  // Create a page tagged "dream-prompt" (and optionally "preference") in the UI.
+  // Create a page tagged "*dream-prompt" (and optionally "*preference") in the UI.
   const rows = await supabaseRequest("pages", {
     query: "?select=content_md,tags&order=created_at.desc&limit=200",
   });
 
   for (const r of rows || []) {
     const tags = r?.tags || [];
-    if (tags.includes("dream-prompt")) return String(r.content_md || "");
+    if (tags.includes("*dream-prompt")) return String(r.content_md || "");
   }
   return "";
 }
@@ -91,7 +91,7 @@ exports.handler = async (event) => {
 
     const dreamPrompt = await loadDreamPrompt();
     if (!dreamPrompt.trim()) {
-      return json(400, { error: "Missing dream prompt. Create a page tagged dream-prompt." });
+      return json(400, { error: "Missing dream prompt. Create a page tagged *dream-prompt." });
     }
 
     const candidates = await loadCandidates(limit);
@@ -155,7 +155,7 @@ exports.handler = async (event) => {
       body: {
         title: diaryTitle,
         content_md: diaryContent,
-        tags: ["dream-diary"],
+        tags: ["*dream-diary"],
         kv_tags: { kind: "dream", updated },
         thread_id: null,
         next_page_id: null,

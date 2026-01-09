@@ -1,15 +1,129 @@
 .enkidu-scroll {
-  /* Purpose: scrollable panels; height is controlled by the container on mobile. */
-  max-height: 60vh;
+  /* Purpose: scrollable panels; height is controlled by the container. */
   overflow: auto;
   white-space: pre-wrap;
+  min-height: 0;
+}
+
+/* Purpose: add breathing room at the bottom of the scrollable panels (doesn't change overall layout height). */
+#chatLog,
+#recallResults {
+  padding-bottom: 100px;
 }
 
 /* Mobile: cap the Chat card height so Recall is visible underneath; chat log scrolls inside. */
 @media (max-width: 991.98px) {
+  .enkidu-scroll {
+    max-height: 60vh;
+  }
+
   .enkidu-chat-card {
     height: 40vh;
     height: 40dvh;
+  }
+}
+
+/* Desktop: make the left/right panels fill the remaining viewport height (below the top bar). */
+@media (min-width: 992px) {
+  html,
+  body {
+    height: 100%;
+  }
+
+  .enkidu-app {
+    /* Purpose: top bar + main row; main row flexes to fill the viewport. */
+    height: 100vh;
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    box-sizing: border-box; /* include padding in the vh height (main has py-3) */
+  }
+
+  .enkidu-main-row {
+    flex: 1 1 auto; /* fill remaining height under the top bar */
+    min-height: 0;
+    overflow: hidden; /* keep the overall layout pinned to the viewport; inner panels scroll */
+  }
+
+  /* Make each column a flex container so its card can stretch full-height. */
+  .enkidu-main-row > [class*="col-"] {
+    display: flex;
+    height: 100%;
+    min-height: 0;
+  }
+
+  .enkidu-main-row > [class*="col-"] > .card {
+    flex: 1 1 auto;
+    height: 100%;
+    min-height: 0;
+    overflow: hidden; /* keep scrolling inside child panels */
+    display: flex; /* header + body stack; body can flex */
+    flex-direction: column;
+  }
+
+  .enkidu-main-row > [class*="col-"] > .card > .card-body {
+    /* Purpose: constrain body so inner panels scroll instead of growing the page. */
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  /* Recall: let the results/editor area fill the card body height. */
+  .enkidu-recall-card .card-body {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    height: 100%;
+    overflow: hidden; /* internal columns handle their own scrolling */
+  }
+
+  .enkidu-recall-card .card-body > .row {
+    flex: 1 1 auto;
+    min-height: 0;
+    height: 100%;
+    overflow: hidden;
+  }
+
+  .enkidu-recall-card .card-body > .row > [class*="col-"] {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    height: 100%;
+    overflow: hidden;
+  }
+
+  /* Left list: results scroll within available height. */
+  .enkidu-recall-card #recallResults {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+  }
+
+  /* Right editor: allow the whole editor stack to scroll if it exceeds the viewport. */
+  .enkidu-recall-card .card-body > .row > .col-md-7 {
+    overflow: auto;
+  }
+
+  /* Right editor: give Markdown/Preview panels their own height + scrollbar. */
+  .enkidu-recall-card .enkidu-md-wrap,
+  .enkidu-recall-card .enkidu-preview-wrap {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+
+  .enkidu-recall-card #pageContent,
+  .enkidu-recall-card #pagePreview {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+  }
+
+  /* Desktop: keep scrolling inside panels, not the page. */
+  body {
+    overflow: hidden;
   }
 }
 
@@ -45,6 +159,34 @@
   margin-bottom: 0;
 }
 
+.enkidu-preview {
+  /* Purpose: when the preview is height-constrained (flex or explicit), scroll instead of overflowing. */
+  overflow: auto;
+  min-height: 0;
+}
+
+/* Purpose: ensure the Recall editor area can constrain the preview so it can actually scroll (works on all widths). */
+.enkidu-recall-card .card-body > .row > .col-md-7 {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.enkidu-recall-card .enkidu-md-wrap,
+.enkidu-recall-card .enkidu-preview-wrap {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.enkidu-recall-card #pageContent,
+.enkidu-recall-card #pagePreview {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
 .enkidu-wikilink {
   /* Purpose: make [[Title]] links obvious and clickable. */
   text-decoration: underline;
@@ -55,6 +197,38 @@
   /* Purpose: keep the picker readable without taking over the screen. */
   max-height: 50vh;
   overflow: auto;
+}
+
+/* -------------------------
+   Preview modal (no Bootstrap JS)
+   ------------------------- */
+
+.enkidu-modal-backdrop {
+  /* Purpose: full-screen click-outside area. */
+  position: fixed;
+  inset: 0;
+  z-index: 3000;
+  background: rgba(0, 0, 0, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+}
+
+.enkidu-modal-panel {
+  /* Purpose: 70vw x 80vh modal panel. */
+  width: 70vw;
+  height: 80vh;
+  max-width: 1200px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.enkidu-modal-body {
+  /* Purpose: scroll within the modal. */
+  overflow: auto;
+  min-height: 0;
 }
 
 .enkidu-result-row {
@@ -101,6 +275,27 @@
   /* Purpose: keep the button compact so input-groups don't balloon. */
   padding-left: 0.45rem;
   padding-right: 0.45rem;
+}
+
+/* -------------------------
+   Chat bubbles: collapsible JSON blocks + page-id links
+   ------------------------- */
+
+.enkidu-json-details {
+  /* Purpose: keep tool JSON readable without spamming the chat log. */
+  margin: 0.25rem 0 0.75rem 0;
+}
+
+.enkidu-json-summary {
+  /* Purpose: clear affordance that this is expandable. */
+  cursor: pointer;
+  user-select: none;
+}
+
+a.enkidu-page-id {
+  /* Purpose: page IDs are actionable (open in RHS). */
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
 }
 
 
