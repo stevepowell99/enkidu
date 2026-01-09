@@ -244,7 +244,7 @@ Set the same env vars you use for Netlify Functions:
 - `SUPABASE_DB_URL` (optional, only for `sql_select`)
 
 For cross-origin calls from the Netlify UI to Cloud Run, set:
-- `ENKIDU_CORS_ORIGIN` to your Netlify site origin (or `*`).
+- `ENKIDU_CORS_ORIGIN` to your UI origin (or `*`). You can also use a comma-separated allowlist, e.g. `http://localhost:8888,https://enkidu-agent.netlify.app`.
 
 ### App usage
 - Open the site, paste your admin token into the top-right input, click **Save**.

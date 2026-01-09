@@ -8,7 +8,7 @@ const { supabaseRequest } = require("./_supabase");
 const { assertNoSecrets, isAllowSecrets } = require("./_secrets");
 const { geminiGenerate } = require("./_gemini");
 const { makeEmbeddingFieldsBatch } = require("./_embeddings");
-const { toolManifestText, executeTool } = require("./_agent_tools");
+const { toolManifestShortText, executeTool } = require("./_agent_tools");
 
 function dumpActiveHandles(label) {
   // Purpose: debug Netlify dev (lambda-local) timeouts where the response succeeds but the event loop won't drain.
@@ -225,65 +225,60 @@ function extractEnkiduAgentEnvelope(text) {
   return { cleaned: raw, agent: null };
 }
 
-async function loadChatContext({ threadId, historyLimit = 20 } = {}) {
-  // Purpose: avoid multiple slow Supabase calls in /api/chat by loading one “recent pages window”
-  // and deriving:
-  // - system prompt (*system)
-  // - preference base pages (*bio/*style/*strategy/*habits/*preference)
-  // - recent thread messages (thread_id match)
-  //
-  // This is intentionally “dumb but fast”: one PostgREST call + in-memory filtering.
-  const SYSTEM_TAG = "*system";
-  const PREF_TAGS = ["*style", "*bio", "*strategy", "*habits", "*preference"];
-  const EXCLUDE_TAGS = new Set(["*dream-prompt", "*split-prompt", "*dream-diary"]);
-
+async function loadSystemPromptText() {
+  // Purpose: load the most recent *system base page.
   const rows = await supabaseRequest("pages", {
-    query: "?select=thread_id,created_at,content_md,kv_tags,tags&order=created_at.desc&limit=600",
+    query:
+      "?select=content_md" +
+      `&tags=cs.{${encodeURIComponent("*system")}}` +
+      "&order=created_at.desc" +
+      "&limit=1",
   });
+  return String(rows?.[0]?.content_md || "");
+}
 
-  let systemText = "";
-  const perTag = new Map(); // tag -> content_md (most recent)
-
-  const threadRows = [];
-  for (const r of rows || []) {
-    const tags = Array.isArray(r?.tags) ? r.tags.map((t) => String(t).trim()) : [];
-
-    if (!systemText && tags.includes(SYSTEM_TAG)) {
-      systemText = String(r?.content_md || "");
-    }
-
-    for (const t of PREF_TAGS) {
-      if (perTag.has(t)) continue;
-      if (!tags.includes(t)) continue;
-      if (tags.some((x) => EXCLUDE_TAGS.has(String(x).trim()))) continue;
-      const md = String(r?.content_md || "");
-      if (!md.trim()) continue;
-      perTag.set(t, md);
-    }
-
-    if (threadId && r?.thread_id === threadId) {
-      // Only keep chat rows with a role (avoid accidentally pulling in non-chat pages that share thread_id).
-      const role = r?.kv_tags?.role;
-      if (role === "assistant" || role === "user") threadRows.push(r);
-    }
-  }
-
+async function loadPreferenceBasePagesText() {
+  // Purpose: load the most recent preference base pages (kept small to avoid OOM on Cloud Run).
+  const tags = ["*style", "*bio", "*strategy", "*habits", "*preference"];
   const parts = [];
-  for (const t of PREF_TAGS) {
-    const md = perTag.get(t);
+  for (const t of tags) {
+    const rows = await supabaseRequest("pages", {
+      query:
+        "?select=content_md" +
+        `&tags=cs.{${encodeURIComponent(t)}}` +
+        "&order=created_at.desc" +
+        "&limit=1",
+    });
+    const md = String(rows?.[0]?.content_md || "").trim();
     if (!md) continue;
     parts.push(`${t}:\n\n${md}`);
   }
-  const prefsText = parts.length ? `Preference base pages:\n\n${parts.join("\n\n")}` : "";
+  return parts.length ? `Preference base pages:\n\n${parts.join("\n\n")}` : "";
+}
 
-  // Thread history: newest-first in DB window, so reverse to chronological and take tail.
-  const ordered = threadRows.slice().reverse().slice(-historyLimit);
-  const history = ordered.map((r) => ({
+async function loadThreadMessages(threadId, limit) {
+  // Purpose: load recent chat messages for the thread (exclude internal tool bubbles).
+  const query =
+    `?select=created_at,content_md,kv_tags` +
+    `&thread_id=eq.${encodeURIComponent(threadId)}` +
+    `&order=created_at.desc` +
+    `&limit=${encodeURIComponent(limit * 3)}`; // oversample, then filter out tool bubbles
+
+  const rows = await supabaseRequest("pages", { query });
+  const filtered = (rows || []).filter((r) => {
+    const kv = r?.kv_tags || {};
+    const role = kv?.role;
+    if (role !== "assistant" && role !== "user") return false;
+    const bubbleKind = typeof kv?.bubble_kind === "string" ? kv.bubble_kind.trim() : "";
+    if (bubbleKind === "plan" || bubbleKind === "tool_call" || bubbleKind === "tool_result") return false;
+    return true;
+  });
+
+  const ordered = filtered.slice(0, limit).reverse();
+  return ordered.map((r) => ({
     role: r?.kv_tags?.role === "assistant" ? "model" : "user",
     text: String(r?.content_md || ""),
   }));
-
-  return { systemText, prefsText, history };
 }
 
 async function loadContextPages(pageIds) {
@@ -391,7 +386,7 @@ function agentProtocolText({ allowWebSearch } = {}) {
     "- Base pages like *bio/*style/*strategy are already included in your system instruction.\n" +
     "- IMPORTANT: if you will call a tool, include your short plan in tool_call.plan (so we can do it in one round-trip).\n" +
     "- If you call a tool, wait for the tool result before proceeding.\n\n" +
-    toolManifestText({ allowWebSearch })
+    toolManifestShortText({ allowWebSearch })
   );
 }
 
@@ -415,6 +410,7 @@ exports.handler = async (event, context) => {
     console.error(`[enkidu] timing ${name}: ${ms}ms`);
   }
   const debugHandles = String(process.env.ENKIDU_DEBUG_HANDLES || "").trim() === "1";
+  const debugPromptSizes = String(process.env.ENKIDU_DEBUG_PROMPT_SIZES || "").trim() === "1";
   if (debugHandles) {
     // Use unref() so the debug timer itself doesn't keep the event loop alive.
     const t1 = setTimeout(() => dumpActiveHandles("t+1s"), 1000);
@@ -445,10 +441,9 @@ exports.handler = async (event, context) => {
     if (!threadId) threadId = crypto.randomUUID();
 
     const tCtx = t0();
-    const { systemText: systemPrompt, prefsText, history } = await loadChatContext({
-      threadId,
-      historyLimit: 20,
-    });
+    const systemPrompt = await loadSystemPromptText();
+    const prefsText = await loadPreferenceBasePagesText();
+    const history = await loadThreadMessages(threadId, 12);
     logTiming("loadChatContext", tCtx);
     const contextPages = await loadContextPages(contextPageIds);
 
@@ -491,6 +486,15 @@ exports.handler = async (event, context) => {
       .join("\n\n");
 
     const messages = [...history, ...extraMessages, { role: "user", text: message }];
+
+    if (debugPromptSizes) {
+      const sysLen = agentSystem.length;
+      const msgsLen = messages.reduce((sum, m) => sum + String(m?.text || "").length, 0);
+      const approxTokens = Math.ceil((sysLen + msgsLen) / 4); // very rough
+      console.error(
+        `[enkidu] prompt_sizes sysChars=${sysLen} msgsChars=${msgsLen} msgs=${messages.length} approxTokens=${approxTokens}`
+      );
+    }
     const stepIds = [];
     let stepIndex = 0;
     let finalText = "";
@@ -633,9 +637,21 @@ exports.handler = async (event, context) => {
     }
 
     // Apply existing enkidu_meta footer behavior to final text (optional).
+    // Defensive: sometimes the model returns the JSON agent envelope but our loop falls back to raw text.
+    // If so, re-parse here so we don't save a giant JSON blob to the chat UI.
+    const reparsed = extractEnkiduAgentEnvelope(finalText);
+    if (reparsed?.agent && typeof reparsed.agent === "object") {
+      const t = String(reparsed.agent.type || "").trim();
+      if (t === "final" && typeof reparsed.agent.text === "string") {
+        finalText = reparsed.agent.text;
+      }
+    }
+
     const { cleaned: cleanedFinal, meta } = extractEnkiduMeta(finalText);
     finalMeta = meta || null;
-    const reply = cleanedFinal;
+    // Defensive: if the model returns an empty string (or only a JSON footer), don't crash the request.
+    let reply = String(cleanedFinal || "");
+    if (!reply.trim()) reply = "(empty reply)";
 
     // Optional: split into additional pages silently via meta.new_pages.
     createdPages = finalMeta ? await createPagesFromMeta(finalMeta, { allowSecrets }) : [];

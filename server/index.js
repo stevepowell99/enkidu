@@ -67,16 +67,47 @@ const app = express();
 app.use(express.text({ type: "*/*", limit: "5mb" }));
 
 // CORS (API-only: UI hosted elsewhere).
-// Keep simple: allow configured origin, default "*".
+// Keep simple: allow configured origin(s).
+// - ENKIDU_CORS_ORIGIN="*" allows all (ok for testing).
+// - Otherwise, set a comma-separated allowlist, e.g.:
+//   ENKIDU_CORS_ORIGIN="http://localhost:8888,https://enkidu-agent.netlify.app"
 app.use((req, res, next) => {
-  const origin = process.env.ENKIDU_CORS_ORIGIN || "*";
-  res.setHeader("access-control-allow-origin", origin);
+  const reqOrigin = String(req.headers.origin || "").trim();
+  const raw = String(process.env.ENKIDU_CORS_ORIGIN || "*").trim();
+  const allowed = raw
+    .split(",")
+    .map((s) => s.trim().replace(/\/+$/, ""))
+    .filter(Boolean);
+
+  const allowAll = allowed.includes("*");
+  const cleanedOrigin = reqOrigin.replace(/\/+$/, "");
+  const match = allowAll ? cleanedOrigin || "*" : cleanedOrigin && allowed.includes(cleanedOrigin) ? cleanedOrigin : "";
+
+  // IMPORTANT: always set Vary so caches don't mix origins.
+  res.setHeader("vary", "origin");
+  if (match) {
+    // When allowAll, echo back the caller origin (more compatible than "*").
+    res.setHeader("access-control-allow-origin", match);
+  }
   res.setHeader("access-control-allow-methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
   res.setHeader(
     "access-control-allow-headers",
     "authorization,content-type,x-enkidu-allow-secrets"
   );
   res.setHeader("access-control-max-age", "600");
+
+  if (String(process.env.ENKIDU_DEBUG_CORS || "").trim() === "1") {
+    // eslint-disable-next-line no-console
+    console.error("[enkidu] cors", {
+      method: req.method,
+      path: req.path,
+      origin: reqOrigin,
+      allowAll,
+      match,
+      allowed,
+    });
+  }
+
   if (req.method === "OPTIONS") return res.status(204).send("");
   next();
 });

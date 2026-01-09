@@ -178,6 +178,24 @@ function toolManifestText({ allowWebSearch } = {}) {
   );
 }
 
+function toolManifestShortText({ allowWebSearch } = {}) {
+  // Purpose: a compact tool list to keep prompts small (avoid token/min quota spikes).
+  const tools = toolManifest({ allowWebSearch });
+  const lines = [];
+  lines.push("Available tools:");
+  for (const t of tools) {
+    const name = String(t?.name || "").trim();
+    const desc = String(t?.description || "").trim();
+    if (!name) continue;
+    lines.push(`- ${name}: ${desc}`);
+  }
+  lines.push("");
+  lines.push("Tool calling rules:");
+  lines.push("- Call at most one tool at a time, then wait for its result.");
+  lines.push("- Keep args small and only include needed fields.");
+  return lines.join("\n");
+}
+
 async function executeTool(name, args, { allowSecrets, allowWebSearch } = {}) {
   const toolName = String(name || "").trim();
   const a = args && typeof args === "object" && !Array.isArray(args) ? args : {};
@@ -417,4 +435,4 @@ async function executeTool(name, args, { allowSecrets, allowWebSearch } = {}) {
   throw new Error(`Unknown tool: ${toolName}`);
 }
 
-module.exports = { toolManifestText, executeTool };
+module.exports = { toolManifestText, toolManifestShortText, executeTool };
