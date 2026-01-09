@@ -45,6 +45,7 @@ exports.handler = async (event) => {
       const kvKey = event.queryStringParameters?.kv_key;
       const kvValue = event.queryStringParameters?.kv_value;
       const relatedTo = event.queryStringParameters?.related_to;
+      const light = String(event.queryStringParameters?.light || "").trim() === "1";
 
       // Vector-related pages (server-side embeddings).
       // Used by the UI when recall search is empty and the user is typing in chat.
@@ -82,8 +83,12 @@ exports.handler = async (event) => {
         filters.push(`kv_tags=cs.${encodeURIComponent(JSON.stringify(obj))}`);
       }
 
+      // Optional "light" mode: omit content_md for big list loads (faster; much smaller payload).
+      const select = light
+        ? `id,created_at,updated_at,thread_id,next_page_id,title,tags,kv_tags`
+        : `id,created_at,updated_at,thread_id,next_page_id,title,tags,kv_tags,content_md`;
       const query =
-        `?select=id,created_at,updated_at,thread_id,next_page_id,title,tags,kv_tags,content_md` +
+        `?select=${select}` +
         `&order=created_at.desc` +
         `&limit=${encodeURIComponent(limit)}` +
         (filters.length ? `&${filters.join("&")}` : "");

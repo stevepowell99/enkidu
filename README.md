@@ -115,6 +115,9 @@ Enkidu
     - `*dream-prompt`: Dream instructions page used by `POST /api/dream`; excluded from normal chat injection and from Dream candidates.
     - `*split-prompt`: reserved for future “split into pages” UX; excluded from normal chat injection.
     - `*dream-diary`: pages written by Dreaming to summarise what changed; excluded from Dream candidates.
+  - **Kind tags (convention)**
+    - These are mutually-exclusive “what is this page” tags: `*chat | *note | *preference | *bio | *strategy | *task | *decision | *question`.
+    - Chat bubbles are always tagged `*chat` (the backend strips other kind tags from `enkidu_meta.suggested_tags` on chat messages to avoid mixing kinds).
   - **KV tags that change behaviour**
     - `role`: `"user"` / `"assistant"`; used to reconstruct chat roles for Gemini + used by UI to filter chat history.
     - `thread_title`: used to label threads in the thread dropdown (preferred over page `title` when present).
@@ -222,6 +225,26 @@ Then open `http://localhost:8888` (Netlify’s default) and paste the same admin
   - `GEMINI_MODEL` (optional)
 
 app is deployed at https://enkidu-agent.netlify.app/  
+
+## Alternative hosting: Cloud Run (API-only) + Netlify (UI)
+
+If you hit local dev / serverless time limits (LLM calls can be slow), you can run the same API on Google Cloud Run.
+
+- **UI**: keep hosting `public/` on Netlify (static).
+- **API**: deploy the Node server in `server/index.js` to Cloud Run.
+
+### Env vars (Cloud Run)
+Set the same env vars you use for Netlify Functions:
+- `ENKIDU_ADMIN_TOKEN`
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `GEMINI_API_KEY`
+- `GEMINI_MODEL` (optional)
+- `GEMINI_EMBED_MODEL` (optional)
+- `SUPABASE_DB_URL` (optional, only for `sql_select`)
+
+For cross-origin calls from the Netlify UI to Cloud Run, set:
+- `ENKIDU_CORS_ORIGIN` to your Netlify site origin (or `*`).
 
 ### App usage
 - Open the site, paste your admin token into the top-right input, click **Save**.

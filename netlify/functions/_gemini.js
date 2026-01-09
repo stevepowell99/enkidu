@@ -1,6 +1,16 @@
 // Gemini (Google AI Studio) helper.
 // Purpose: keep Gemini API key server-side only, and keep fetch code in one place.
 
+// Netlify dev (lambda-local) can hang until timeout if Node's fetch keeps sockets alive.
+// Configure undici to close idle sockets quickly (safe in prod; helps a lot in local dev).
+try {
+  // eslint-disable-next-line global-require
+  const { setGlobalDispatcher, Agent } = require("undici");
+  setGlobalDispatcher(new Agent({ keepAliveTimeout: 50, keepAliveMaxTimeout: 50 }));
+} catch {
+  // If undici isn't available for some reason, do nothing.
+}
+
 function getGeminiConfig() {
   const apiKey = process.env.GEMINI_API_KEY;
   // Default model (Jan 2026): keep aligned with the UI default.
@@ -38,11 +48,27 @@ async function geminiGenerate({ system, messages, model, tools } = {}) {
     ...(Array.isArray(tools) && tools.length ? { tools } : {}),
   };
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  const timeoutMs = Number(process.env.ENKIDU_HTTP_TIMEOUT_MS || 20000);
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
+
+  let res;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    const msg = String(err?.message || err);
+    if (msg.toLowerCase().includes("aborted")) {
+      throw new Error(`Gemini generate timed out after ${timeoutMs}ms (model=${modelName})`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(t);
+  }
 
   const json = await res.json().catch(() => null);
   if (!res.ok) {
@@ -71,11 +97,27 @@ async function geminiEmbed({ text, model, taskType = "RETRIEVAL_DOCUMENT" }) {
     taskType,
   };
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  const timeoutMs = Number(process.env.ENKIDU_HTTP_TIMEOUT_MS || 20000);
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
+
+  let res;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    const msg = String(err?.message || err);
+    if (msg.toLowerCase().includes("aborted")) {
+      throw new Error(`Gemini embed timed out after ${timeoutMs}ms (model=${modelName})`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(t);
+  }
 
   const json = await res.json().catch(() => null);
   if (!res.ok) {
@@ -112,11 +154,27 @@ async function geminiBatchEmbed({ texts, model, taskType = "RETRIEVAL_DOCUMENT" 
     })),
   };
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  const timeoutMs = Number(process.env.ENKIDU_HTTP_TIMEOUT_MS || 20000);
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
+
+  let res;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    const msg = String(err?.message || err);
+    if (msg.toLowerCase().includes("aborted")) {
+      throw new Error(`Gemini batch embed timed out after ${timeoutMs}ms (model=${modelName})`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(t);
+  }
 
   const json = await res.json().catch(() => null);
   if (!res.ok) {

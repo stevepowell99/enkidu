@@ -5,6 +5,9 @@ const LS_TOKEN_KEY = "enkidu_admin_token";
 const LS_ALLOW_SECRETS_KEY = "enkidu_allow_secrets";
 const LS_USE_WEB_SEARCH_KEY = "enkidu_use_web_search";
 const LS_LIVE_RELATED_KEY = "enkidu_live_related";
+const LS_PAGES_CACHE_KEY = "enkidu_pages_cache_v1";
+const LS_PAGES_CACHE_TS_KEY = "enkidu_pages_cache_ts_v1";
+const LS_API_BASE_KEY = "enkidu_api_base_url";
 const DEFAULT_MODEL_ID = "gemini-3-flash-preview";
 
 // Debug logging (enable per session in DevTools console):
@@ -395,6 +398,16 @@ function setToken(token) {
   localStorage.setItem(LS_TOKEN_KEY, token);
 }
 
+function getApiBaseUrl() {
+  // Purpose: allow hosting API separately (e.g. Cloud Run) while keeping UI static (e.g. Netlify).
+  return (localStorage.getItem(LS_API_BASE_KEY) || "").trim().replace(/\/+$/, "");
+}
+
+function setApiBaseUrl(url) {
+  const cleaned = String(url || "").trim().replace(/\/+$/, "");
+  localStorage.setItem(LS_API_BASE_KEY, cleaned);
+}
+
 function getAllowSecrets() {
   // Purpose: default OFF on each new browser session (do not persist across sessions).
   return sessionStorage.getItem(LS_ALLOW_SECRETS_KEY) === "1";
@@ -445,7 +458,9 @@ function clearClipParamsFromUrl() {
 async function apiFetch(path, { method = "GET", body } = {}) {
   const token = getToken();
   const allowSecrets = getAllowSecrets();
-  const res = await fetch(path, {
+  const base = getApiBaseUrl();
+  const url = base ? `${base}${path}` : path;
+  const res = await fetch(url, {
     method,
     headers: {
       "content-type": "application/json",
@@ -531,6 +546,44 @@ let relatedDebounce = null;
 const selectedPayloadIds = new Set(); // pages selected to include in next chat request
 let relatedRequestSeq = 0; // increments per related recompute (used to ignore stale async results)
 let kvTagStats = null; // computed from recent pages: key -> { topValue, counts(Map) }
+
+function readPagesCacheFromStorage() {
+  // Purpose: avoid repeatedly fetching thousands of pages in local dev.
+  // Cache is metadata-only (light=1): no content_md.
+  try {
+    const ts = Number(localStorage.getItem(LS_PAGES_CACHE_TS_KEY) || 0);
+    const raw = localStorage.getItem(LS_PAGES_CACHE_KEY) || "";
+    if (!raw) return null;
+    // TTL: 6 hours (good enough; user can invalidate by saving/deleting pages).
+    const ttlMs = 6 * 60 * 60 * 1000;
+    if (!Number.isFinite(ts) || Date.now() - ts > ttlMs) return null;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function writePagesCacheToStorage(pages) {
+  try {
+    localStorage.setItem(LS_PAGES_CACHE_KEY, JSON.stringify(pages || []));
+    localStorage.setItem(LS_PAGES_CACHE_TS_KEY, String(Date.now()));
+  } catch {
+    // ignore (storage full/private mode/etc)
+  }
+}
+
+function invalidatePagesCache({ reason = "" } = {}) {
+  // Purpose: keep cached titles/tags reasonably fresh.
+  recentPagesCache = null;
+  kvTagStats = null;
+  try {
+    localStorage.removeItem(LS_PAGES_CACHE_KEY);
+    localStorage.removeItem(LS_PAGES_CACHE_TS_KEY);
+  } catch {}
+  if (reason) dbg("pagesCache:invalidated", { reason });
+}
 
 // -------------------------
 // Wikilinks (Obsidian-style [[Title]])
@@ -1043,11 +1096,25 @@ function updateKvKeySuggestionsFromPages(pages, { limit = 20 } = {}) {
 
 async function ensureRecentPagesCache() {
   if (recentPagesCache) return recentPagesCache;
+
+  // Prefer localStorage cache (fast, no network).
+  const cached = readPagesCacheFromStorage();
+  if (cached) {
+    recentPagesCache = cached;
+    updateTagSuggestionsFromPages(recentPagesCache);
+    updateKvKeySuggestionsFromPages(recentPagesCache);
+    dbg("pagesCache:hit", { count: recentPagesCache.length });
+    return recentPagesCache;
+  }
+
   // Load a larger window so wikilink/title pickers can see "any page" in normal use.
-  const data = await apiFetch(`/api/pages?limit=2000`);
+  // IMPORTANT: use light=1 to avoid fetching full content_md for thousands of pages (too slow).
+  const data = await apiFetch(`/api/pages?limit=2000&light=1`);
   recentPagesCache = data.pages || [];
+  writePagesCacheToStorage(recentPagesCache);
   updateTagSuggestionsFromPages(recentPagesCache);
   updateKvKeySuggestionsFromPages(recentPagesCache);
+  dbg("pagesCache:miss", { count: recentPagesCache.length });
   return recentPagesCache;
 }
 
@@ -1097,6 +1164,8 @@ function updatePayloadCount() {
 let selectedPageId = null;
 let isEditingMarkdown = false; // merged markdown+preview: preview by default when non-empty
 let autosaveDebounce = null;
+let autosaveInFlight = false; // Purpose: avoid overlapping autosave requests (can create multiple pages).
+let autosaveRequestedDuringFlight = false; // Purpose: if user types while saving, queue one more autosave after finish.
 let suppressAutosave = false; // Purpose: avoid autosave when we programmatically fill fields.
 let lastSavedPayloadJson = null; // Purpose: avoid saving when nothing changed.
 let previewClickTimer = null; // Purpose: single-click opens modal; double-click edits (cancel timer).
@@ -1180,11 +1249,23 @@ async function autosaveNow() {
   const payloadJson = JSON.stringify(payload);
   if (payloadJson === lastSavedPayloadJson) return;
 
-  await savePage({ reason: "autosave" });
+  // Prevent overlapping autosaves (especially important before the first create returns an id).
+  if (autosaveInFlight) {
+    autosaveRequestedDuringFlight = true;
+    return;
+  }
+
+  autosaveInFlight = true;
   try {
-    lastSavedPayloadJson = JSON.stringify(buildRecallPayloadFromUi());
-  } catch {
-    lastSavedPayloadJson = null;
+    await savePage({ reason: "autosave" });
+    // Important: record what we actually attempted to save (not whatever the user typed while the request was in-flight).
+    lastSavedPayloadJson = payloadJson;
+  } finally {
+    autosaveInFlight = false;
+    if (autosaveRequestedDuringFlight) {
+      autosaveRequestedDuringFlight = false;
+      scheduleAutosave(); // debounce + save the latest edits (if any) after this request completed
+    }
   }
 }
 
@@ -1347,27 +1428,27 @@ async function recallSearch() {
   const tag = normalizeTagFilter(($("recallTag").value || "").trim());
   const kvKey = ($("recallKvKey")?.value || "").trim();
   const kvValue = ($("recallKvValue")?.value || "").trim();
-  const draft = ($("chatInput")?.value || "").trim();
+  const chatText = ($("chatInput")?.value || "").trim();
+  const hasFilters = !!(tag || kvKey || kvValue);
   const matchers0 = getRelatedMatchers();
   dbg("recallSearch:start", {
-    mode: tag || kvKey || kvValue ? "search" : "related",
-    draftLen: draft.length,
+    mode: hasFilters ? "filtered-related" : "related",
+    chatTextLen: chatText.length,
     tag,
     kvKey,
     kvValue,
     matchers: matchers0,
   });
 
-  // If user typed tag/KV filters, use server search (optional substring q from chat draft).
-  if (tag || kvKey || kvValue) {
+  // If user typed tag/KV filters WITHOUT any chat text, use server search (filters-only).
+  // When chat text exists, we keep "Related" behavior and apply tag/KV as additive filters.
+  if (hasFilters && !chatText) {
     if ((kvKey && !kvValue) || (!kvKey && kvValue)) {
       throw new Error("KV filter requires both key and value");
     }
     setStatus("Searching...", "secondary");
-    const chatQ = ($("chatInput")?.value || "").trim();
     const params = [];
     params.push("limit=50");
-    if (chatQ) params.push(`q=${encodeURIComponent(chatQ)}`);
     if (tag) params.push(`tag=${encodeURIComponent(tag)}`);
     if (kvKey) params.push(`kv_key=${encodeURIComponent(kvKey)}`);
     if (kvValue) params.push(`kv_value=${encodeURIComponent(kvValue)}`);
@@ -1380,12 +1461,48 @@ async function recallSearch() {
   }
 
   // Otherwise: "related pages" mode based on current chatbox text.
-  const chatText = ($("chatInput").value || "").trim();
   const matchers = getRelatedMatchers();
   const requestSeq = ++relatedRequestSeq;
   dbg("recallSearch:related", { requestSeq, chatTextLen: chatText.length, matchers });
 
   setStatus("Loading related pages...", "secondary");
+
+  function parseKvFilterValue(raw) {
+    // Purpose: mirror backend KV query parsing (bool/number/null/JSON/string) for additive filtering.
+    const s = String(raw ?? "").trim();
+    if (!s) return "";
+    if (s === "true") return true;
+    if (s === "false") return false;
+    if (s === "null") return null;
+    if (/^-?\d+(\.\d+)?$/.test(s)) return Number(s);
+    if (s.startsWith("{") || s.startsWith("[") || (s.startsWith('"') && s.endsWith('"'))) {
+      try {
+        return JSON.parse(s);
+      } catch {
+        // fall through to string
+      }
+    }
+    return s;
+  }
+
+  function pageMatchesFilters(p) {
+    // Purpose: apply Recall tag/KV fields as additive filters to whatever "Related" produces.
+    if (tag) {
+      const tags = Array.isArray(p?.tags) ? p.tags : [];
+      if (!tags.includes(tag)) return false;
+    }
+    if (kvKey || kvValue) {
+      if ((kvKey && !kvValue) || (!kvKey && kvValue)) return false; // should be prevented earlier; keep consistent.
+      const kv = p?.kv_tags;
+      if (!kv || typeof kv !== "object" || Array.isArray(kv)) return false;
+      const want = parseKvFilterValue(kvValue);
+      const have = kv[String(kvKey)];
+      if (have === undefined) return false;
+      if (typeof have === "object") return JSON.stringify(have) === JSON.stringify(want);
+      return have === want;
+    }
+    return true;
+  }
 
   // If there is no chat text yet, just show recent assistant chat pages.
   if (!chatText) {
@@ -1450,9 +1567,10 @@ async function recallSearch() {
         (p) =>
           (p?.kv_tags?.role === "assistant" || p?.kv_tags?.role === "user") && (p?.tags || []).includes("*chat")
       );
+  const filteredCandidates = hasFilters ? candidates.filter(pageMatchesFilters) : candidates;
   dbg("recallSearch:candidates", {
     requestSeq,
-    candidates: candidates.length,
+    candidates: filteredCandidates.length,
     queryTokens: queryTokens.length,
     scope: matchers.title ? "all-pages" : "chat-only",
   });
@@ -1464,7 +1582,7 @@ async function recallSearch() {
 
   const useHeuristic = matchers.time || matchers.text || matchers.title;
   const scored = useHeuristic
-    ? candidates
+    ? filteredCandidates
         .map((p) => {
           const textScore = scoreOverlap(queryTokens, p.content_md || "");
           const titleScore = scoreOverlap(queryTokens, p.title || "");
@@ -1511,17 +1629,18 @@ async function recallSearch() {
   }
 
   try {
-    const emb = await loadEmbeddingsRelated(haveHeuristic ? 25 : 50);
+    const embRaw = await loadEmbeddingsRelated(hasFilters ? 200 : haveHeuristic ? 25 : 50);
     if (requestSeq !== relatedRequestSeq) return; // stale (user typed again)
-    const embIds = new Set(emb.map((p) => p.id));
-    const merged = haveHeuristic ? [...emb, ...topHeuristic.filter((p) => !embIds.has(p.id))].slice(0, 50) : emb;
+    const emb = hasFilters ? (embRaw || []).filter(pageMatchesFilters).slice(0, 50) : embRaw;
+    const embIds = new Set((emb || []).map((p) => p.id));
+    const merged = haveHeuristic ? [...(emb || []), ...topHeuristic.filter((p) => !embIds.has(p.id))].slice(0, 50) : emb || [];
     renderRecallResults(merged);
     setStatus(`Related: showing ${merged.length} pages.`, "success");
     dbg("recallSearch:final", {
       requestSeq,
       mode: haveHeuristic ? "embeddings+heuristic" : "embeddings-only",
       merged: merged.length,
-      emb: emb.length,
+      emb: (emb || []).length,
       heuristic: topHeuristic.length,
     });
   } catch (e) {
@@ -1565,7 +1684,7 @@ async function savePage({ reason = "manual" } = {}) {
       setSelectedPage(data.page);
       setStatus("Saved (created).", "success");
     }
-    recentPagesCache = null; // drop cache so Related + tag suggestions reflect new/updated pages
+    invalidatePagesCache({ reason: "savePage:create" });
     await recallSearch();
     return;
   }
@@ -1581,7 +1700,7 @@ async function savePage({ reason = "manual" } = {}) {
     setSelectedPage(data.page);
     setStatus("Saved.", "success");
   }
-  recentPagesCache = null; // drop cache so Related + tag suggestions reflect new/updated pages
+  invalidatePagesCache({ reason: "savePage:update" });
   await recallSearch();
 }
 
@@ -1605,7 +1724,7 @@ async function deletePage() {
 
   updatePayloadCount();
   setSelectedPage(null);
-  recentPagesCache = null; // drop client cache so "Related" doesn't show deleted pages
+  invalidatePagesCache({ reason: "deletePage" });
   setStatus("Deleted.", "success");
   await recallSearch();
 }
@@ -1614,36 +1733,50 @@ async function deletePage() {
 // Chat panel
 // -------------------------
 
+function makeChatMsgDiv(p, { pending = false } = {}) {
+  // Purpose: single canonical builder for a chat message bubble (used by both render + optimistic append).
+  const role = p?.kv_tags?.role || "user";
+  const div = document.createElement("div");
+  div.className = `enkidu-msg ${role === "assistant" ? "enkidu-msg-assistant" : "enkidu-msg-user"}`;
+  if (pending) div.classList.add("opacity-75");
+
+  const head = document.createElement("div");
+  head.className = "small text-secondary mb-1";
+  head.textContent = `${role} — ${p?.created_at ? new Date(p.created_at).toLocaleString() : ""}`;
+
+  const body = document.createElement("div");
+  // Purpose: assistant replies are Markdown; render as HTML for readability.
+  // NOTE: this renders HTML produced by `marked` (treat assistant content as untrusted).
+  if (role === "assistant" && window.marked) {
+    body.innerHTML = window.marked.parse(preprocessWikilinks(p.content_md || ""));
+    collapseJsonCodeBlocks(body);
+    linkifyPageIdsInText(body);
+  } else {
+    body.textContent = p.content_md || "";
+    linkifyPageIdsInText(body);
+  }
+
+  div.appendChild(head);
+  div.appendChild(body);
+  return div;
+}
+
+function appendChatMsg(p, { pending = false } = {}) {
+  // Purpose: optimistic UI update (append one bubble without reloading the whole thread).
+  const root = $("chatLog");
+  const div = makeChatMsgDiv(p, { pending });
+  root.appendChild(div);
+  root.scrollTop = root.scrollHeight;
+  return div;
+}
+
 function renderChatLog(pages) {
   const root = $("chatLog");
   root.innerHTML = "";
 
   const ordered = (pages || []).slice().reverse();
   for (const p of ordered) {
-    const role = p?.kv_tags?.role || "user";
-    const div = document.createElement("div");
-    div.className = `enkidu-msg ${role === "assistant" ? "enkidu-msg-assistant" : "enkidu-msg-user"}`;
-
-    const head = document.createElement("div");
-    head.className = "small text-secondary mb-1";
-    head.textContent = `${role} — ${p.created_at ? new Date(p.created_at).toLocaleString() : ""}`;
-
-    const body = document.createElement("div");
-    // Purpose: assistant replies are Markdown; render as HTML for readability.
-    // NOTE: this renders HTML produced by `marked` (treat assistant content as untrusted).
-    if (role === "assistant" && window.marked) {
-      body.innerHTML = window.marked.parse(preprocessWikilinks(p.content_md || ""));
-      collapseJsonCodeBlocks(body);
-      linkifyPageIdsInText(body);
-    } else {
-      body.textContent = p.content_md || "";
-      linkifyPageIdsInText(body);
-    }
-
-    div.appendChild(head);
-    div.appendChild(body);
-
-    root.appendChild(div);
+    root.appendChild(makeChatMsgDiv(p));
   }
 
   root.scrollTop = root.scrollHeight;
@@ -1667,6 +1800,15 @@ async function sendChat() {
   const threadId = ($("threadSelect").value || "").trim();
   if (!msg.trim()) return;
 
+  // Purpose: optimistic UI update — show the user's bubble immediately (before waiting on the server).
+  $("chatInput").value = "";
+  refreshClearButtons();
+  const optimisticEl = appendChatMsg(
+    { content_md: msg, created_at: new Date().toISOString(), kv_tags: { role: "user" } },
+    { pending: true }
+  );
+  setStatus("Sending...", "secondary");
+
   // Auto-payload: if draft contains [[wikilinks]], include those pages as context payload.
   const linkTitles = extractWikilinkTitles(msg);
   if (linkTitles.length) {
@@ -1678,17 +1820,20 @@ async function sendChat() {
     updateRelatedToggleLabel();
   }
 
-  $("chatInput").value = "";
-  refreshClearButtons();
-  setStatus("Sending...", "secondary");
-
   const model = $("chatModel").value || null;
   const use_web_search = !!$("useWebSearch")?.checked;
   const context_page_ids = Array.from(selectedPayloadIds);
-  const data = await apiFetch("/api/chat", {
-    method: "POST",
-    body: { message: msg, thread_id: threadId || null, model, context_page_ids, use_web_search },
-  });
+  let data;
+  try {
+    data = await apiFetch("/api/chat", {
+      method: "POST",
+      body: { message: msg, thread_id: threadId || null, model, context_page_ids, use_web_search },
+    });
+  } catch (e) {
+    // Purpose: if send fails, remove the optimistic bubble so the log matches reality.
+    optimisticEl?.remove();
+    throw e;
+  }
 
   // If the assistant created split pages, backfill embeddings in a separate call
   // so chat doesn’t block on N embedding requests (avoids Netlify dev 30s timeout).
@@ -1718,6 +1863,7 @@ function init() {
   initClearButtons();
   initKvTagsBuilder();
   $("adminToken").value = getToken();
+  if ($("apiBaseUrl")) $("apiBaseUrl").value = getApiBaseUrl();
   refreshClearButtons();
   updatePayloadCount();
   if ($("allowSecrets")) $("allowSecrets").checked = getAllowSecrets();
@@ -1736,6 +1882,14 @@ function init() {
     loadThreads().catch(() => {});
     ensureRecentPagesCache().catch(() => {});
   };
+  $("saveApiBase")?.addEventListener("click", () => {
+    setApiBaseUrl(($("apiBaseUrl")?.value || "").trim());
+    setStatus("API base saved. Reloading models/threads...", "success");
+    invalidatePagesCache({ reason: "apiBaseChanged" });
+    loadModels().catch(() => {});
+    loadThreads().catch(() => {});
+    ensureRecentPagesCache().catch(() => {});
+  });
   $("allowSecrets")?.addEventListener("change", () => {
     setAllowSecrets(!!$("allowSecrets").checked);
   });
@@ -1855,13 +2009,12 @@ function init() {
     }
   });
   $("chatInput").addEventListener("input", () => {
-    // While recall search fields are empty, keep the related pages list synced to chat input.
+    // Keep the recall list synced to chat input (and apply tag/KV filters additively when present).
     dbg("chatInput:input", { len: ($("chatInput")?.value || "").length, searchActive: isRecallSearchActive() });
 
     // Wikilink picker in chat box.
     openOrUpdateWikilinkPicker($("chatInput")).catch(() => {});
 
-    if (isRecallSearchActive()) return;
     if (!getLiveRelated()) return;
     if (relatedDebounce) clearTimeout(relatedDebounce);
     relatedDebounce = setTimeout(() => {
@@ -2134,7 +2287,7 @@ async function runDream() {
   setStatus("Dreaming...", "secondary");
   const data = await apiFetch("/api/dream", { method: "POST", body: { limit: 8 } });
   // Refresh caches and UI lists after the dream changed some pages.
-  recentPagesCache = null;
+  invalidatePagesCache({ reason: "dream" });
   await recallSearch();
   const msg =
     data && typeof data === "object"

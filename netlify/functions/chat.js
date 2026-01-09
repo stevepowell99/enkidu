@@ -10,6 +10,51 @@ const { geminiGenerate } = require("./_gemini");
 const { makeEmbeddingFieldsBatch } = require("./_embeddings");
 const { toolManifestText, executeTool } = require("./_agent_tools");
 
+function dumpActiveHandles(label) {
+  // Purpose: debug Netlify dev (lambda-local) timeouts where the response succeeds but the event loop won't drain.
+  // Opt-in via env: ENKIDU_DEBUG_HANDLES=1
+  //
+  // Note: uses Node internals; keep it local-dev only.
+  const handles = typeof process._getActiveHandles === "function" ? process._getActiveHandles() : [];
+  const requests = typeof process._getActiveRequests === "function" ? process._getActiveRequests() : [];
+
+  function describe(h) {
+    try {
+      const name = h?.constructor?.name || typeof h;
+      if (name === "Socket") {
+        const r = h.remoteAddress ? `${h.remoteAddress}:${h.remotePort || ""}` : "";
+        const l = h.localAddress ? `${h.localAddress}:${h.localPort || ""}` : "";
+        const host = h.servername ? ` servername=${h.servername}` : "";
+        return `Socket local=${l} remote=${r}${host}`;
+      }
+      if (name === "TLSSocket") {
+        const r = h.remoteAddress ? `${h.remoteAddress}:${h.remotePort || ""}` : "";
+        const host = h.servername ? ` servername=${h.servername}` : "";
+        return `TLSSocket remote=${r}${host}`;
+      }
+      if (name === "Timeout") return "Timeout";
+      if (name === "Immediate") return "Immediate";
+      return name;
+    } catch {
+      return "UnknownHandle";
+    }
+  }
+
+  const summary = {};
+  for (const h of handles) {
+    const k = h?.constructor?.name || "unknown";
+    summary[k] = (summary[k] || 0) + 1;
+  }
+
+  console.error(
+    `[enkidu] debug_handles ${label}: handles=${handles.length} requests=${requests.length} byType=${JSON.stringify(summary)}`
+  );
+  // Print a small sample so you can spot which sockets are hanging around.
+  for (const h of handles.slice(0, 12)) {
+    console.error(`[enkidu] debug_handles sample: ${describe(h)}`);
+  }
+}
+
 function json(statusCode, obj) {
   return {
     statusCode,
@@ -30,6 +75,17 @@ function uniqueStrings(arr) {
   }
   return out;
 }
+
+const KIND_TAGS = new Set([
+  "*chat",
+  "*note",
+  "*preference",
+  "*bio",
+  "*strategy",
+  "*task",
+  "*decision",
+  "*question",
+]);
 
 function extractEnkiduMeta(text) {
   // Purpose: allow the model to append a JSON footer that we can parse and apply.
@@ -169,41 +225,65 @@ function extractEnkiduAgentEnvelope(text) {
   return { cleaned: raw, agent: null };
 }
 
-async function loadThreadMessages(threadId, limit) {
-  const query =
-    `?select=created_at,content_md,kv_tags` +
-    `&thread_id=eq.${encodeURIComponent(threadId)}` +
-    `&order=created_at.desc` +
-    `&limit=${encodeURIComponent(limit)}`;
-
-  const rows = await supabaseRequest("pages", { query });
-  const ordered = (rows || []).slice().reverse();
-
-  const messages = [];
-  for (const r of ordered) {
-    const role = r?.kv_tags?.role === "assistant" ? "model" : "user";
-    messages.push({ role, text: String(r?.content_md || "") });
-  }
-  return messages;
-}
-
-async function loadSystemPromptText() {
-  // NOTE: we intentionally keep systemInstruction *only* the most recent *system page.
-  // Any extra context is passed as normal user messages.
+async function loadChatContext({ threadId, historyLimit = 20 } = {}) {
+  // Purpose: avoid multiple slow Supabase calls in /api/chat by loading one “recent pages window”
+  // and deriving:
+  // - system prompt (*system)
+  // - preference base pages (*bio/*style/*strategy/*habits/*preference)
+  // - recent thread messages (thread_id match)
+  //
+  // This is intentionally “dumb but fast”: one PostgREST call + in-memory filtering.
   const SYSTEM_TAG = "*system";
+  const PREF_TAGS = ["*style", "*bio", "*strategy", "*habits", "*preference"];
+  const EXCLUDE_TAGS = new Set(["*dream-prompt", "*split-prompt", "*dream-diary"]);
 
-  // PostgREST doesn't support OR across tags in one query param; simplest is to just
-  // fetch a small window and filter in JS.
   const rows = await supabaseRequest("pages", {
-    query: "?select=content_md,tags&order=created_at.desc&limit=200",
+    query: "?select=thread_id,created_at,content_md,kv_tags,tags&order=created_at.desc&limit=600",
   });
 
+  let systemText = "";
+  const perTag = new Map(); // tag -> content_md (most recent)
+
+  const threadRows = [];
   for (const r of rows || []) {
-    const rt = r?.tags || [];
-    if (rt.some((t) => String(t).trim() === SYSTEM_TAG)) return String(r.content_md || "");
+    const tags = Array.isArray(r?.tags) ? r.tags.map((t) => String(t).trim()) : [];
+
+    if (!systemText && tags.includes(SYSTEM_TAG)) {
+      systemText = String(r?.content_md || "");
+    }
+
+    for (const t of PREF_TAGS) {
+      if (perTag.has(t)) continue;
+      if (!tags.includes(t)) continue;
+      if (tags.some((x) => EXCLUDE_TAGS.has(String(x).trim()))) continue;
+      const md = String(r?.content_md || "");
+      if (!md.trim()) continue;
+      perTag.set(t, md);
+    }
+
+    if (threadId && r?.thread_id === threadId) {
+      // Only keep chat rows with a role (avoid accidentally pulling in non-chat pages that share thread_id).
+      const role = r?.kv_tags?.role;
+      if (role === "assistant" || role === "user") threadRows.push(r);
+    }
   }
 
-  return "";
+  const parts = [];
+  for (const t of PREF_TAGS) {
+    const md = perTag.get(t);
+    if (!md) continue;
+    parts.push(`${t}:\n\n${md}`);
+  }
+  const prefsText = parts.length ? `Preference base pages:\n\n${parts.join("\n\n")}` : "";
+
+  // Thread history: newest-first in DB window, so reverse to chronological and take tail.
+  const ordered = threadRows.slice().reverse().slice(-historyLimit);
+  const history = ordered.map((r) => ({
+    role: r?.kv_tags?.role === "assistant" ? "model" : "user",
+    text: String(r?.content_md || ""),
+  }));
+
+  return { systemText, prefsText, history };
 }
 
 async function loadContextPages(pageIds) {
@@ -252,12 +332,6 @@ async function createPagesFromMeta(meta, { allowSecrets } = {}) {
   }
 
   if (!cleaned.length) return [];
-
-  // Batch embed first (1 API call), then bulk insert with embeddings inline.
-  const embedFields = await makeEmbeddingFieldsBatch({
-    contents_md: cleaned.map((p) => p.content_md),
-  });
-  for (let i = 0; i < cleaned.length; i++) cleaned[i] = { ...cleaned[i], ...embedFields[i] };
 
   // Bulk insert (PostgREST accepts an array body).
   const rows = await supabaseRequest("pages", {
@@ -309,17 +383,45 @@ function agentProtocolText({ allowWebSearch } = {}) {
     "No prose outside that JSON.\n\n" +
     "Allowed response types:\n" +
     "- plan: {\"enkidu_agent\":{\"type\":\"plan\",\"text\":\"...\"}}\n" +
-    "- tool_call: {\"enkidu_agent\":{\"type\":\"tool_call\",\"id\":\"...\",\"name\":\"...\",\"args\":{...}}}\n" +
+    "- tool_call: {\"enkidu_agent\":{\"type\":\"tool_call\",\"id\":\"...\",\"name\":\"...\",\"args\":{...},\"plan\":\"...\"}}\n" +
     "- final: {\"enkidu_agent\":{\"type\":\"final\",\"text\":\"...\"}}\n\n" +
     "Notes:\n" +
     "- Use tools only when needed. Prefer minimal steps.\n" +
     "- For writes (create/update/delete), be explicit and cautious.\n" +
+    "- Base pages like *bio/*style/*strategy are already included in your system instruction.\n" +
+    "- IMPORTANT: if you will call a tool, include your short plan in tool_call.plan (so we can do it in one round-trip).\n" +
     "- If you call a tool, wait for the tool result before proceeding.\n\n" +
     toolManifestText({ allowWebSearch })
   );
 }
 
-exports.handler = async (event) => {
+exports.handler = async (event, context) => {
+  // Netlify dev (lambda-local) can hang until timeout if the event loop has open handles
+  // (e.g., keep-alive sockets from fetch/undici). This matches AWS Lambda best practice.
+  if (context) context.callbackWaitsForEmptyEventLoop = false;
+  // Netlify dev hard-times out at 30s; never let upstream fetches run longer than that.
+  // (User may set ENKIDU_HTTP_TIMEOUT_MS higher; clamp it here for chat.)
+  const existingTimeout = Number(process.env.ENKIDU_HTTP_TIMEOUT_MS || 20000);
+  const clampedTimeout = Math.min(Number.isFinite(existingTimeout) ? existingTimeout : 20000, 25000);
+  process.env.ENKIDU_HTTP_TIMEOUT_MS = String(clampedTimeout);
+
+  const debugTimings = String(process.env.ENKIDU_DEBUG_TIMINGS || "").trim() === "1";
+  function t0() {
+    return Date.now();
+  }
+  function logTiming(name, startMs) {
+    if (!debugTimings) return;
+    const ms = Date.now() - startMs;
+    console.error(`[enkidu] timing ${name}: ${ms}ms`);
+  }
+  const debugHandles = String(process.env.ENKIDU_DEBUG_HANDLES || "").trim() === "1";
+  if (debugHandles) {
+    // Use unref() so the debug timer itself doesn't keep the event loop alive.
+    const t1 = setTimeout(() => dumpActiveHandles("t+1s"), 1000);
+    const t5 = setTimeout(() => dumpActiveHandles("t+5s"), 5000);
+    if (typeof t1.unref === "function") t1.unref();
+    if (typeof t5.unref === "function") t5.unref();
+  }
   const auth = requireAdmin(event);
   if (!auth.ok) return auth.response;
 
@@ -332,6 +434,7 @@ exports.handler = async (event) => {
     const body = JSON.parse(event.body || "{}");
     const message = String(body.message || "");
     let threadId = body.thread_id ? String(body.thread_id) : "";
+    const isNewThread = !threadId;
     const model = body.model ? String(body.model) : null;
     const contextPageIds = body.context_page_ids || [];
     const useWebSearch = body.use_web_search === true;
@@ -341,8 +444,12 @@ exports.handler = async (event) => {
 
     if (!threadId) threadId = crypto.randomUUID();
 
-    const history = await loadThreadMessages(threadId, 20);
-    const systemPrompt = await loadSystemPromptText();
+    const tCtx = t0();
+    const { systemText: systemPrompt, prefsText, history } = await loadChatContext({
+      threadId,
+      historyLimit: 20,
+    });
+    logTiming("loadChatContext", tCtx);
     const contextPages = await loadContextPages(contextPageIds);
 
     // Pass selected context pages as a separate user message (keeps system prompt "pure").
@@ -357,8 +464,7 @@ exports.handler = async (event) => {
       extraMessages.push({ role: "user", text: `Selected context pages:\n${ctx}` });
     }
 
-    // Save user message as first bubble (so UI shows it immediately on reload).
-    const [userEmbed] = await makeEmbeddingFieldsBatch({ contents_md: [message] });
+    // Save user message as first bubble (embedding is deferred to /api/backfill-embeddings).
     const userRows = await supabaseRequest("pages", {
       method: "POST",
       query: "?select=id",
@@ -369,7 +475,6 @@ exports.handler = async (event) => {
         tags: ["*chat"],
         kv_tags: { role: "user" },
         next_page_id: null,
-        ...(userEmbed || {}),
       },
     });
     const userPageId = userRows?.[0]?.id || null;
@@ -377,7 +482,11 @@ exports.handler = async (event) => {
     // -------------------------
     // Agent loop (plan -> tool_call* -> final)
     // -------------------------
-    const agentSystem = [String(systemPrompt || "").trim(), agentProtocolText({ allowWebSearch: useWebSearch })]
+    const agentSystem = [
+      String(systemPrompt || "").trim(),
+      String(prefsText || "").trim(),
+      agentProtocolText({ allowWebSearch: useWebSearch }),
+    ]
       .filter(Boolean)
       .join("\n\n");
 
@@ -390,7 +499,9 @@ exports.handler = async (event) => {
 
     // Keep this small to avoid Netlify dev lambda-local 30s timeouts.
     for (let iter = 0; iter < 4; iter++) {
+      const tGem = t0();
       const raw = await geminiGenerate({ system: agentSystem, messages, model });
+      logTiming("geminiGenerate", tGem);
       const { agent } = extractEnkiduAgentEnvelope(raw);
 
       // If the model didn't comply, treat as a final answer to avoid breaking the chat.
@@ -424,6 +535,23 @@ exports.handler = async (event) => {
         const name = String(agent.name || "").trim();
         const args = agent.args && typeof agent.args === "object" && !Array.isArray(agent.args) ? agent.args : {};
         if (!name) throw new Error("Agent tool_call.name is required");
+
+        // Optional: allow the model to include a plan alongside the tool call (saves one extra Gemini call).
+        const planText = typeof agent.plan === "string" ? agent.plan.trim() : "";
+        if (planText) {
+          const planPageId = await saveChatBubble({
+            threadId,
+            title: null,
+            content_md: planText,
+            tags: ["*chat"],
+            kv_tags: { role: "assistant", bubble_kind: "plan", step_index: stepIndex },
+            allowSecrets,
+            embed: false,
+          });
+          if (planPageId) stepIds.push(planPageId);
+          messages.push({ role: "model", text: planText });
+          stepIndex++;
+        }
 
         const callText =
           `Tool call: ${name}\n\n` +
@@ -484,6 +612,15 @@ exports.handler = async (event) => {
         if (resultPageId) stepIds.push(resultPageId);
         messages.push({ role: "user", text: resultText });
         stepIndex++;
+
+        // IMPORTANT (netlify dev 30s timeout): for write tools, don't require an extra model call.
+        // We already did the work and persisted the call+result bubbles; return a short final message.
+        if (ok && ["create_page", "update_page", "delete_page"].includes(name)) {
+          const id = result?.page?.id || (typeof args?.id === "string" ? args.id : "");
+          const shortId = id && typeof id === "string" ? id : "";
+          finalText = shortId ? `Done. (${name}: ${shortId})` : `Done. (${name})`;
+          break;
+        }
         continue;
       }
 
@@ -505,13 +642,22 @@ exports.handler = async (event) => {
 
     // Save final assistant bubble (with existing suggested_* behavior if present).
     assertNoSecrets(reply, { allow: allowSecrets });
-    const suggestedTags = Array.isArray(finalMeta?.suggested_tags) ? finalMeta.suggested_tags : [];
+    const suggestedTagsRaw = Array.isArray(finalMeta?.suggested_tags) ? finalMeta.suggested_tags : [];
+    // Kind tags: keep chat bubbles as kind=*chat (avoid mixing kinds on a chat message).
+    const suggestedTags = suggestedTagsRaw.filter((t) => !KIND_TAGS.has(String(t).trim()));
     const suggestedTitle =
       typeof finalMeta?.suggested_title === "string" && finalMeta.suggested_title.trim()
         ? finalMeta.suggested_title.trim()
         : null;
     const suggestedThreadTitle =
       typeof finalMeta?.suggested_thread_title === "string" ? finalMeta.suggested_thread_title.trim() : "";
+    const fallbackThreadTitle = isNewThread
+      ? String(message || "")
+          .trim()
+          .split(/\r?\n/g)[0]
+          .replace(/\s+/g, " ")
+          .slice(0, 80)
+      : "";
     const suggestedKv =
       finalMeta?.suggested_kv_tags && typeof finalMeta.suggested_kv_tags === "object" ? finalMeta.suggested_kv_tags : {};
 
@@ -521,7 +667,7 @@ exports.handler = async (event) => {
       role: "assistant",
       bubble_kind: "final",
       step_index: stepIndex,
-      ...(suggestedThreadTitle ? { thread_title: suggestedThreadTitle } : {}),
+      ...(suggestedThreadTitle ? { thread_title: suggestedThreadTitle } : fallbackThreadTitle ? { thread_title: fallbackThreadTitle } : {}),
     };
 
     const assistantPageId = await saveChatBubble({
@@ -531,13 +677,25 @@ exports.handler = async (event) => {
       tags: assistantTags,
       kv_tags: assistantKv,
       allowSecrets,
+      embed: false, // defer embedding to /api/backfill-embeddings
     });
+
+    // Embeddings backfill: include any pages we created/updated without embeddings.
+    const createdPageIds = Array.from(
+      new Set(
+        []
+          .concat(createdPages.map((p) => p.id))
+          .concat(userPageId ? [userPageId] : [])
+          .concat(assistantPageId ? [assistantPageId] : [])
+          .concat(stepIds || [])
+      )
+    );
 
     return json(200, {
       thread_id: threadId,
       reply,
       meta: finalMeta,
-      created_pages: createdPages.map((p) => p.id),
+      created_pages: createdPageIds,
       saved: { userPageId, assistantPageId, agentStepIds: stepIds },
     });
   } catch (err) {

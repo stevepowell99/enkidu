@@ -1,0 +1,8 @@
+node_modules
+.netlify
+.cursor
+.git
+.env
+terminals
+*.log
+

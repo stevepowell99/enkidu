@@ -1,22 +1,30 @@
 // Agent tools (allowlisted).
-// Purpose: give the chat agent safe, explicit capabilities without raw SQL.
+// Purpose: give the chat agent explicit capabilities without exposing raw HTTP or raw SQL writes.
 //
-// Design notes:
-// - Keep this minimal and boring: tools are just functions the server runs.
-// - The model never makes HTTP requests directly; it requests tool calls and we execute them.
-// - Side effects are limited to CRUD on `public.pages` (via Supabase PostgREST) + vector search RPC.
+// IMPORTANT:
+// - Tool execution happens server-side; the model only requests tool calls.
+// - We keep this dependency-light (Supabase via PostgREST).
 
 const { supabaseRequest } = require("./_supabase");
 const { assertNoSecrets } = require("./_secrets");
 const { makeEmbeddingFields } = require("./_embeddings");
 const { geminiGenerate } = require("./_gemini");
-const { Pool } = require("pg");
+
+// Optional dependency: only needed for sql_select. Keep normal chat working without it.
+let Pool = null;
+try {
+  // eslint-disable-next-line global-require
+  ({ Pool } = require("pg"));
+} catch {
+  Pool = null;
+}
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 let pgPool = null;
 function getPgPool() {
   // Purpose: SELECT-only SQL fallback when PostgREST filters aren't enough.
+  if (!Pool) throw new Error('sql_select requires npm dependency "pg" (run npm install)');
   const url = process.env.SUPABASE_DB_URL || process.env.ENKIDU_DB_URL || "";
   if (!url) throw new Error("Missing SUPABASE_DB_URL (or ENKIDU_DB_URL)");
   if (!pgPool) pgPool = new Pool({ connectionString: url, max: 1 });
@@ -43,7 +51,6 @@ function safeString(v, { maxLen = 20000 } = {}) {
 
 function safeTags(tags) {
   const arr = Array.isArray(tags) ? tags.map((t) => String(t).trim()).filter(Boolean) : [];
-  // Keep tags small; they're just strings in an array column.
   if (arr.length > 50) throw new Error("Too many tags (max 50)");
   return arr;
 }
@@ -51,7 +58,6 @@ function safeTags(tags) {
 function safeKvTags(kv) {
   if (kv == null) return {};
   if (!kv || typeof kv !== "object" || Array.isArray(kv)) throw new Error("kv_tags must be an object");
-  // Keep it shallow/JSON-safe; we won't deep-validate here.
   const out = {};
   for (const [k, v] of Object.entries(kv)) {
     const key = String(k).trim();
@@ -62,12 +68,10 @@ function safeKvTags(kv) {
 }
 
 function toolManifest({ allowWebSearch } = {}) {
-  // Purpose: small manifest injected into the model prompt, so it knows available tools.
-  // Keep schemas simple; they are for the model, not a full validator.
   const tools = [
     {
       name: "search_pages",
-      description: "List/search pages from the pages table (substring search + simple filters).",
+      description: "List/search pages (substring search + simple filters).",
       args_schema: {
         type: "object",
         properties: {
@@ -82,7 +86,7 @@ function toolManifest({ allowWebSearch } = {}) {
     },
     {
       name: "related_pages",
-      description: "Semantic vector search over pages using pgvector embeddings.",
+      description: "Semantic vector search over pages (pgvector) given a query string.",
       args_schema: {
         type: "object",
         properties: { query_text: { type: "string" }, limit: { type: "number" } },
@@ -91,35 +95,21 @@ function toolManifest({ allowWebSearch } = {}) {
     },
     {
       name: "related_to_page",
-      description: "Semantic vector search for pages similar to a specific page id.",
-      args_schema: {
-        type: "object",
-        properties: { id: { type: "string" }, limit: { type: "number" } },
-        required: ["id"],
-      },
+      description: "Semantic vector search for pages similar to a page id.",
+      args_schema: { type: "object", properties: { id: { type: "string" }, limit: { type: "number" } }, required: ["id"] },
     },
     {
       name: "related_to_most_recent_page",
-      description:
-        "Find the most recent page (optionally filtered) and return pages semantically similar to it (pgvector).",
+      description: "Find the most recent page (optional filters) and return semantically similar pages.",
       args_schema: {
         type: "object",
-        properties: {
-          limit: { type: "number" },
-          tag: { type: "string" },
-          kv_key: { type: "string" },
-          kv_value: { type: "string" },
-        },
+        properties: { limit: { type: "number" }, tag: { type: "string" }, kv_key: { type: "string" }, kv_value: { type: "string" } },
       },
     },
-    {
-      name: "get_page",
-      description: "Fetch a single page by id.",
-      args_schema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
-    },
+    { name: "get_page", description: "Fetch a single page by id.", args_schema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } },
     {
       name: "create_page",
-      description: "Create a new page (writes to DB).",
+      description: "Create a page (DB write).",
       args_schema: {
         type: "object",
         properties: {
@@ -135,7 +125,7 @@ function toolManifest({ allowWebSearch } = {}) {
     },
     {
       name: "update_page",
-      description: "Update a page by id (patch allowed fields).",
+      description: "Update a page by id (DB write).",
       args_schema: {
         type: "object",
         properties: {
@@ -155,31 +145,18 @@ function toolManifest({ allowWebSearch } = {}) {
         required: ["id", "patch"],
       },
     },
-    {
-      name: "delete_page",
-      description: "Delete a page by id.",
-      args_schema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
-    },
+    { name: "delete_page", description: "Delete a page by id (DB write).", args_schema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } },
     {
       name: "sql_select",
-      description:
-        "Fallback: run a read-only SQL query (SELECT/CTE only) against Postgres. No UPDATE/DELETE/INSERT allowed.",
-      args_schema: {
-        type: "object",
-        properties: {
-          sql: { type: "string" },
-          max_rows: { type: "number" },
-        },
-        required: ["sql"],
-      },
+      description: "Fallback: run a read-only SQL query (SELECT/CTE only). No UPDATE/DELETE/INSERT.",
+      args_schema: { type: "object", properties: { sql: { type: "string" }, max_rows: { type: "number" } }, required: ["sql"] },
     },
   ];
 
   if (allowWebSearch) {
     tools.push({
       name: "web_search",
-      description:
-        "Run a web search via Gemini's google_search grounding and return a concise answer with citations.",
+      description: "Run a web search via Gemini google_search grounding and return a concise markdown answer.",
       args_schema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
     });
   }
@@ -188,16 +165,12 @@ function toolManifest({ allowWebSearch } = {}) {
 }
 
 function toolManifestText({ allowWebSearch } = {}) {
-  const tools = toolManifest({ allowWebSearch });
   return (
     "Available tools (JSON):\n" +
     JSON.stringify(
       {
-        tools,
-        notes: [
-          "Use tools only when needed; otherwise answer directly.",
-          "For write tools, be explicit about intended changes.",
-        ],
+        tools: toolManifest({ allowWebSearch }),
+        notes: ["Use tools only when needed; otherwise answer directly.", "For write tools, be explicit about intended changes."],
       },
       null,
       2
@@ -241,14 +214,9 @@ async function executeTool(name, args, { allowSecrets, allowWebSearch } = {}) {
     if (!queryText) throw new Error("query_text is required");
     const limit = clampLimit(a.limit, { max: 200, fallback: 25 });
 
-    // IMPORTANT: embed as query.
     const embed = await makeEmbeddingFields({ content_md: queryText, taskType: "RETRIEVAL_QUERY" });
     if (!embed?.embedding) throw new Error("Failed to embed query_text");
-
-    const rows = await supabaseRequest("rpc/match_pages", {
-      method: "POST",
-      body: { query_embedding: embed.embedding, match_count: limit },
-    });
+    const rows = await supabaseRequest("rpc/match_pages", { method: "POST", body: { query_embedding: embed.embedding, match_count: limit } });
     return { pages: rows || [] };
   }
 
@@ -256,16 +224,12 @@ async function executeTool(name, args, { allowSecrets, allowWebSearch } = {}) {
     const id = safeUuid(a.id);
     const limit = clampLimit(a.limit, { max: 200, fallback: 25 });
 
-    // Fetch source page. Prefer stored pgvector embedding to avoid extra API calls.
-    const rows = await supabaseRequest("pages", {
-      query: `?select=id,title,content_md,embedding&limit=1&id=eq.${encodeURIComponent(id)}`,
-    });
+    const rows = await supabaseRequest("pages", { query: `?select=id,title,content_md,embedding&limit=1&id=eq.${encodeURIComponent(id)}` });
     const page = rows?.[0] || null;
     if (!page) throw new Error("Page not found");
 
     let queryEmbedding = Array.isArray(page.embedding) && page.embedding.length ? page.embedding : null;
     if (!queryEmbedding) {
-      // Only if missing: embed the page content as a query.
       const queryText = String(page.content_md || "").trim();
       if (!queryText) throw new Error("Source page has empty content_md");
       const embed = await makeEmbeddingFields({ content_md: queryText, taskType: "RETRIEVAL_QUERY" });
@@ -273,12 +237,8 @@ async function executeTool(name, args, { allowSecrets, allowWebSearch } = {}) {
       queryEmbedding = embed.embedding;
     }
 
-    const hits = await supabaseRequest("rpc/match_pages", {
-      method: "POST",
-      body: { query_embedding: queryEmbedding, match_count: limit + 1 },
-    });
+    const hits = await supabaseRequest("rpc/match_pages", { method: "POST", body: { query_embedding: queryEmbedding, match_count: limit + 1 } });
     const pages = (hits || []).filter((p) => String(p?.id || "") !== id).slice(0, limit);
-
     return { source_page: { id: page.id, title: page.title || null }, pages };
   }
 
@@ -305,7 +265,6 @@ async function executeTool(name, args, { allowSecrets, allowWebSearch } = {}) {
     const rows = await supabaseRequest("pages", { query });
     const page = rows?.[0] || null;
     if (!page?.id) throw new Error("No pages found");
-
     const rel = await executeTool("related_to_page", { id: page.id, limit }, { allowSecrets, allowWebSearch });
     return { most_recent_page: page, ...rel };
   }
@@ -334,7 +293,6 @@ async function executeTool(name, args, { allowSecrets, allowWebSearch } = {}) {
     if (title) assertNoSecrets(title, { allow: allowSecrets });
     assertNoSecrets(content_md, { allow: allowSecrets });
 
-    const embed = await makeEmbeddingFields({ content_md });
     const body = {
       title: title || null,
       content_md,
@@ -342,7 +300,10 @@ async function executeTool(name, args, { allowSecrets, allowWebSearch } = {}) {
       kv_tags,
       thread_id,
       next_page_id,
-      ...(embed || {}),
+      // Embedding deferred (filled by /api/backfill-embeddings).
+      embedding: null,
+      embedding_model: null,
+      embedding_updated_at: null,
     };
 
     const rows = await supabaseRequest("pages", {
@@ -358,7 +319,6 @@ async function executeTool(name, args, { allowSecrets, allowWebSearch } = {}) {
     const patchIn = a.patch && typeof a.patch === "object" && !Array.isArray(a.patch) ? a.patch : null;
     if (!patchIn) throw new Error("patch is required");
 
-    // Allowed fields only (match netlify/functions/page.js).
     const patch = {};
     if (patchIn.title !== undefined) patch.title = patchIn.title ?? null;
     if (patchIn.content_md !== undefined) patch.content_md = safeString(patchIn.content_md, { maxLen: 200000 });
@@ -377,8 +337,10 @@ async function executeTool(name, args, { allowSecrets, allowWebSearch } = {}) {
     if (patch.content_md !== undefined) {
       if (!String(patch.content_md || "").trim()) throw new Error("content_md cannot be blank");
       assertNoSecrets(patch.content_md, { allow: allowSecrets });
-      const embed = await makeEmbeddingFields({ content_md: patch.content_md });
-      if (embed) Object.assign(patch, embed);
+      // Embedding deferred (filled by /api/backfill-embeddings).
+      patch.embedding = null;
+      patch.embedding_model = null;
+      patch.embedding_updated_at = null;
     }
 
     const rows = await supabaseRequest("pages", {
@@ -402,10 +364,7 @@ async function executeTool(name, args, { allowSecrets, allowWebSearch } = {}) {
     let sql = String(sqlRaw || "").trim().replace(/;+\s*$/, "");
     if (!sql) throw new Error("sql is required");
 
-    // Hard gate: SELECT/CTE only.
     if (!/^(with\b|select\b)/i.test(sql)) throw new Error("Only SELECT/CTE queries are allowed");
-    // Crude keyword blocklist to avoid obvious non-read operations.
-    // (Single-user app; this is a simple guard, not a full SQL parser.)
     const lowered = sql.toLowerCase();
     const blocked = ["update", "delete", "insert", "alter", "drop", "create", "truncate", "grant", "revoke", "vacuum"];
     for (const w of blocked) {
@@ -425,7 +384,6 @@ async function executeTool(name, args, { allowSecrets, allowWebSearch } = {}) {
       await client.query("SET LOCAL statement_timeout = '8000ms'");
       const res = await client.query(wrapped, [maxRows]);
       await client.query("ROLLBACK");
-
       return {
         columns: res.fields?.map((f) => f.name) || [],
         row_count: res.rowCount || 0,
@@ -447,7 +405,6 @@ async function executeTool(name, args, { allowSecrets, allowWebSearch } = {}) {
     const query = safeString(a.query, { maxLen: 400 }).trim();
     if (!query) throw new Error("query is required");
 
-    // Minimal: rely on Gemini grounding. Return a concise markdown answer with citations.
     const text = await geminiGenerate({
       system:
         "You are a web search tool. Use google_search grounding. Return a concise markdown answer with citations where possible.",
@@ -461,5 +418,3 @@ async function executeTool(name, args, { allowSecrets, allowWebSearch } = {}) {
 }
 
 module.exports = { toolManifestText, executeTool };
-
-

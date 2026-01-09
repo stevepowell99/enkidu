@@ -6,8 +6,16 @@ function getAuthHeader(headers) {
   return headers?.authorization || headers?.Authorization || "";
 }
 
+function normalizeAuthHeaderValue(v) {
+  // Purpose: be tolerant of harmless whitespace differences across proxies/clients.
+  // Keep strict semantics: still requires "Bearer <token>".
+  return String(v || "")
+    .trim()
+    .replace(/\s+/g, " "); // collapse runs of whitespace
+}
+
 function requireAdmin(event) {
-  const adminToken = process.env.ENKIDU_ADMIN_TOKEN;
+  const adminToken = String(process.env.ENKIDU_ADMIN_TOKEN || "").trim();
   if (!adminToken) {
     return {
       ok: false,
@@ -18,14 +26,20 @@ function requireAdmin(event) {
     };
   }
 
-  const auth = getAuthHeader(event.headers);
-  const expected = `Bearer ${adminToken}`;
+  const auth = normalizeAuthHeaderValue(getAuthHeader(event.headers));
+  const expected = normalizeAuthHeaderValue(`Bearer ${adminToken}`);
   if (auth !== expected) {
+    // Non-sensitive hint for debugging auth mismatches across environments.
+    const hint = JSON.stringify({
+      got_prefix: auth.slice(0, 7), // typically "Bearer "
+      got_len: auth.length,
+      expected_len: expected.length,
+    });
     return {
       ok: false,
       response: {
         statusCode: 401,
-        body: "Unauthorized",
+        body: `Unauthorized\n${hint}`,
       },
     };
   }
