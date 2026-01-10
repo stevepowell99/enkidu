@@ -88,7 +88,6 @@ Enkidu
       - `create_page`: create a page (writes DB)
       - `update_page`: update a page by id (writes DB; allowed fields only)
       - `delete_page`: delete a page (writes DB)
-      - `sql_select`: fallback for **arbitrary read-only SQL** (SELECT/CTE only; blocks UPDATE/DELETE/INSERT). Requires `SUPABASE_DB_URL`.
       - `web_search`: (only when `use_web_search: true`) uses Gemini `google_search` grounding and returns a concise markdown answer
   - `GET /api/pages`: list + substring search (`q`) + filters (`tag`, `thread_id`)
   - `POST /api/pages`: create page
@@ -177,15 +176,6 @@ Put these in `.env` (or real env vars). See `env.example`.
 - `ENKIDU_ADMIN_TOKEN` (required; keep private)
 - `SUPABASE_URL` (required)
 - `SUPABASE_SERVICE_ROLE_KEY` (required; server-side only; use Supabase \"secret\" key)
-- `SUPABASE_DB_URL` (optional; only needed for `sql_select`; direct Postgres connection string)
-  - IMPORTANT (Windows / many home networks): the default Supabase DB host `db.<ref>.supabase.co` may be **IPv6-only**. If your network can’t reach IPv6, `sql_select` will fail.
-  - Fix (single variant that works locally):
-    - Either **enable IPv6 connectivity** on your machine/network, OR
-    - Use a Supabase connection string that has **IPv4** (Supabase may require the **IPv4 add-on** for this).
-  - Note: Supabase “pooler / PgBouncer” endpoints are not guaranteed IPv4 on all plans/configs (Supabase UI may explicitly say “Dedicated Pooler is not IPv4 compatible”).
-  - Why the rest of Enkidu still works on IPv4-only networks:
-    - Most API calls use **Supabase PostgREST + RPC over HTTPS** (`SUPABASE_URL/rest/v1/...`), which is reachable even if direct Postgres is not.
-    - `sql_select` is different: it opens a **direct TCP connection** to Postgres on port **5432**, so it depends on whether your machine/network can reach the DB host (IPv6 vs IPv4).
 - `GEMINI_API_KEY` (required; server-side only)
 - `GEMINI_MODEL` (optional; default `gemini-3-flash-preview`)
 - `GEMINI_EMBED_MODEL` (optional; default `text-embedding-004`)
@@ -285,7 +275,6 @@ Set the same env vars you use for Netlify Functions:
 - `GEMINI_API_KEY`
 - `GEMINI_MODEL` (optional)
 - `GEMINI_EMBED_MODEL` (optional)
-- `SUPABASE_DB_URL` (optional, only for `sql_select`)
 
 For cross-origin calls from the Netlify UI to Cloud Run, set:
 - `ENKIDU_CORS_ORIGIN` to your UI origin (or `*`). You can also use a comma-separated allowlist, e.g. `http://localhost:8888,https://enkidu-agent.netlify.app`.

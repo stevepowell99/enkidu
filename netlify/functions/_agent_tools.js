@@ -9,69 +9,8 @@ const { supabaseRequest, supabaseRequestMeta } = require("./_supabase");
 const { assertNoSecrets } = require("./_secrets");
 const { makeEmbeddingFields } = require("./_embeddings");
 const { geminiGenerate } = require("./_gemini");
-const dns = require("dns");
-
-// Optional dependency: only needed for sql_select. Keep normal chat working without it.
-let Pool = null;
-try {
-  // eslint-disable-next-line global-require
-  ({ Pool } = require("pg"));
-} catch {
-  Pool = null;
-}
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-let pgPool = null;
-// NOTE: no connection fallbacks. If your DB host is IPv6-only and your network can't reach IPv6,
-// you must use a Supabase pooler hostname (IPv4) for SUPABASE_DB_URL.
-
-function parsePgUrl(url) {
-  // Purpose: safely parse a Postgres connection URL into parts (so we can override host reliably).
-  const u = new URL(String(url || ""));
-  const user = decodeURIComponent(String(u.username || ""));
-  const password = decodeURIComponent(String(u.password || ""));
-  const database = String(u.pathname || "").replace(/^\/+/, "");
-  const port = u.port ? Number(u.port) : 5432;
-  const host = String(u.hostname || "");
-  const sslMode = String(u.searchParams?.get?.("sslmode") || "").toLowerCase();
-  return { user, password, database, port, host, sslMode };
-}
-
-function getPgPool() {
-  // Purpose: SELECT-only SQL fallback when PostgREST filters aren't enough.
-  if (!Pool) throw new Error('sql_select requires npm dependency "pg" (run npm install)');
-  const url = process.env.SUPABASE_DB_URL || process.env.ENKIDU_DB_URL || "";
-  if (!url) throw new Error("Missing SUPABASE_DB_URL (or ENKIDU_DB_URL)");
-  if (!pgPool) {
-    // Purpose: avoid lambda-local 30s hangs on bad DNS/SSL/credentials by failing fast.
-    let useSsl = false;
-    let host = "";
-    try {
-      const u = new URL(url);
-      host = String(u.hostname || "");
-      const h = host.toLowerCase();
-      const sslMode = String(u.searchParams?.get?.("sslmode") || "").toLowerCase();
-      // Supabase Postgres requires SSL; also respect sslmode=require (common in Supabase URLs).
-      useSsl = h.endsWith(".supabase.co") || h.includes("supabase") || sslMode === "require";
-    } catch {
-      useSsl = false;
-    }
-    if (String(process.env.ENKIDU_DEBUG_SQL || "").trim() === "1") {
-      // eslint-disable-next-line no-console
-      console.error("[enkidu] sql_select pool", { host, ssl: useSsl });
-    }
-    pgPool = new Pool({
-      connectionString: url,
-      max: 1,
-      connectionTimeoutMillis: 8000,
-      ...(useSsl ? { ssl: { rejectUnauthorized: false } } : {}),
-    });
-  }
-  return pgPool;
-}
-
-// (No host override pool)
 
 function clampLimit(raw, { min = 1, max = 200, fallback = 50 } = {}) {
   const n = Number(raw);
@@ -190,9 +129,16 @@ function toolManifest({ allowWebSearch } = {}) {
     },
     { name: "delete_page", description: "Delete a page by id (DB write).", args_schema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } },
     {
-      name: "sql_select",
-      description: "Fallback: run a read-only SQL query (SELECT/CTE only). No UPDATE/DELETE/INSERT.",
-      args_schema: { type: "object", properties: { sql: { type: "string" }, max_rows: { type: "number" } }, required: ["sql"] },
+      name: "delete_thread",
+      description: "Delete an entire thread's *chat pages only (never deletes non-*chat pages).",
+      args_schema: {
+        type: "object",
+        properties: {
+          thread_id: { type: "string" },
+          confirm: { type: "boolean" },
+        },
+        required: ["thread_id", "confirm"],
+      },
     },
     {
       name: "find_duplicate_zotero_citekeys",
@@ -440,87 +386,37 @@ async function executeTool(name, args, { allowSecrets, allowWebSearch } = {}) {
     return { ok: true };
   }
 
-  if (toolName === "sql_select") {
-    const sqlRaw = safeString(a.sql, { maxLen: 40000 });
-    let sql = String(sqlRaw || "").trim().replace(/;+\s*$/, "");
-    if (!sql) throw new Error("sql is required");
+  if (toolName === "delete_thread") {
+    // Purpose: delete *chat pages belonging to a thread (thread_id is a UUID).
+    const threadId = safeUuid(a.thread_id);
+    if (a.confirm !== true) throw new Error("confirm must be true");
 
-    if (!/^(with\b|select\b)/i.test(sql)) throw new Error("Only SELECT/CTE queries are allowed");
-    const lowered = sql.toLowerCase();
-    const blocked = ["update", "delete", "insert", "alter", "drop", "create", "truncate", "grant", "revoke", "vacuum"];
-    for (const w of blocked) {
-      if (lowered.includes(w + " ")) throw new Error(`Blocked keyword in sql: ${w}`);
-    }
-    if (lowered.includes(" for update") || lowered.includes(" for share")) {
-      throw new Error("FOR UPDATE/SHARE is not allowed");
-    }
+    // Count before/after so the caller gets a deterministic result.
+    const before = await supabaseRequestMeta("pages", {
+      method: "GET",
+      query: `?select=id&limit=1&thread_id=eq.${encodeURIComponent(threadId)}&tags=cs.{${encodeURIComponent("*chat")}}`,
+      returnRepresentation: true,
+      count: "exact",
+    });
+    const beforeRange = String(before.headers?.["content-range"] || "");
+    const beforeTotal = Number(beforeRange.split("/")[1] || "0") || 0;
 
-    const maxRows = clampLimit(a.max_rows, { min: 1, max: 500, fallback: 200 });
-    const wrapped = `SELECT * FROM (${sql}) AS enkidu_q LIMIT $1`;
+    await supabaseRequest("pages", {
+      method: "DELETE",
+      query: `?thread_id=eq.${encodeURIComponent(threadId)}&tags=cs.{${encodeURIComponent("*chat")}}`,
+      returnRepresentation: false,
+    });
 
-    const pool = getPgPool();
-    let client;
-    try {
-      client = await pool.connect();
-    } catch (e) {
-      // Keep this error actionable without leaking the connection string.
-      const url = process.env.SUPABASE_DB_URL || process.env.ENKIDU_DB_URL || "";
-      let host = "";
-      let sslMode = "";
-      try {
-        const u = new URL(url);
-        host = String(u.hostname || "");
-        sslMode = String(u.searchParams?.get?.("sslmode") || "");
-      } catch {}
-      const msg = String(e?.message || e);
-      const code = String(e?.code || "");
-      // Make the failure deterministic and actionable (no fallbacks).
-      let aRecords = [];
-      let aaaaRecords = [];
-      if (host) {
-        try {
-          aRecords = await dns.promises.resolve4(host);
-        } catch {
-          aRecords = [];
-        }
-        try {
-          aaaaRecords = await dns.promises.resolve6(host);
-        } catch {
-          aaaaRecords = [];
-        }
-      }
-      if (host && !aRecords.length && aaaaRecords.length) {
-        throw new Error(
-          `sql_select cannot connect: DB host is IPv6-only (host=${host} dns_a=[] dns_aaaa=${JSON.stringify(
-            aaaaRecords
-          )}). Your network cannot reach IPv6 Postgres endpoints. Fix: enable IPv6 routing, or use an IPv4-capable Supabase connection string (this may require Supabase's IPv4 add-on).`
-        );
-      }
-      throw new Error(
-        `sql_select failed to connect (code=${code || "?"} host=${host || "?"}${sslMode ? ` sslmode=${sslMode}` : ""} dns_a=${JSON.stringify(
-          aRecords
-        )} dns_aaaa=${JSON.stringify(aaaaRecords)}): ${msg}`
-      );
-    }
-    try {
-      await client.query("BEGIN");
-      await client.query("SET LOCAL statement_timeout = '8000ms'");
-      const res = await client.query(wrapped, [maxRows]);
-      await client.query("ROLLBACK");
-      return {
-        columns: res.fields?.map((f) => f.name) || [],
-        row_count: res.rowCount || 0,
-        rows: res.rows || [],
-        truncated: (res.rowCount || 0) >= maxRows,
-      };
-    } catch (e) {
-      try {
-        await client.query("ROLLBACK");
-      } catch {}
-      throw e;
-    } finally {
-      client.release();
-    }
+    const after = await supabaseRequestMeta("pages", {
+      method: "GET",
+      query: `?select=id&limit=1&thread_id=eq.${encodeURIComponent(threadId)}&tags=cs.{${encodeURIComponent("*chat")}}`,
+      returnRepresentation: true,
+      count: "exact",
+    });
+    const afterRange = String(after.headers?.["content-range"] || "");
+    const afterTotal = Number(afterRange.split("/")[1] || "0") || 0;
+
+    return { ok: true, thread_id: threadId, deleted: Math.max(0, beforeTotal - afterTotal) };
   }
 
   if (toolName === "find_duplicate_zotero_citekeys") {

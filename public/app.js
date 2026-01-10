@@ -518,6 +518,7 @@ let chatInFlight = false;
 // Purpose: only backfill embeddings when the user is idle, and stop immediately when they become active.
 let lastUserActivityAtMs = Date.now();
 let autoBackfillController = null;
+let dreamInFlight = false; // Purpose: avoid overlapping Dream runs (manual button + auto idle trigger).
 function markUserActivity() {
   lastUserActivityAtMs = Date.now();
   // Stop any background backfill as soon as the user interacts again.
@@ -582,6 +583,19 @@ async function refreshEmbeddingStatus() {
       if (idleMs > 120_000 && now - window.__enkiduLastAutoBackfillAtMs > 60_000) {
         window.__enkiduLastAutoBackfillAtMs = now;
         autoBackfillEmbeddingsOnce().catch(() => {});
+      }
+    }
+
+    // Auto-dream: when you're idle AND embeddings are up-to-date, run a Dream pass periodically.
+    // Purpose: Dreaming shouldn't require a button press, and it should naturally include the background embedding generation work.
+    if (n <= 0 && !chatInFlight && !dreamInFlight) {
+      const now = Date.now();
+      if (!window.__enkiduLastAutoDreamAtMs) window.__enkiduLastAutoDreamAtMs = 0;
+      const idleMs = now - lastUserActivityAtMs;
+      // Keep conservative: only when idle for a while, and at most once per 15 minutes.
+      if (idleMs > 180_000 && now - window.__enkiduLastAutoDreamAtMs > 15 * 60_000) {
+        window.__enkiduLastAutoDreamAtMs = now;
+        runDream().catch(() => {});
       }
     }
     if (n <= 0) {
@@ -1984,6 +1998,29 @@ async function reloadThread() {
   setStatus(`Loaded ${data.pages?.length || 0} messages.`, "success");
 }
 
+async function deleteThread() {
+  // Purpose: delete the currently selected thread (all pages with this thread_id).
+  const threadId = ($("threadSelect").value || "").trim();
+  if (!threadId) {
+    setStatus("Select a thread to delete.", "secondary");
+    return;
+  }
+
+  if (!confirm("Delete this entire thread (all pages in it)?")) return;
+
+  setStatus("Deleting thread...", "secondary");
+  const data = await apiFetch(`/api/threads?thread_id=${encodeURIComponent(threadId)}&confirm=1`, { method: "DELETE" });
+
+  // Clear UI state so we don't keep pointing at a deleted thread.
+  $("threadSelect").value = "";
+  $("chatLog").innerHTML = "";
+  invalidatePagesCache({ reason: "deleteThread" });
+
+  await loadThreads();
+  await recallSearch();
+  setStatus(`Deleted thread (${data?.deleted ?? "?"} pages).`, "success");
+}
+
 async function sendChat() {
   if (chatInFlight) return; // prevent overlapping sends
   const msg = $("chatInput").value || "";
@@ -2380,6 +2417,7 @@ function init() {
   });
   $("reloadChat").onclick = () => reloadThread().catch((e) => setStatus(e.message, "danger"));
   $("newThread").onclick = () => newThread();
+  $("deleteThread")?.addEventListener("click", () => deleteThread().catch((e) => setStatus(e.message, "danger")));
   $("threadSelect").addEventListener("change", () => {
     reloadThread().catch((e) => setStatus(e.message, "danger"));
   });
@@ -2504,16 +2542,22 @@ async function loadThreads(selectThreadId = null) {
 }
 
 async function runDream() {
-  setStatus("Dreaming...", "secondary");
-  const data = await apiFetch("/api/dream", { method: "POST", body: { limit: 8 } });
-  // Refresh caches and UI lists after the dream changed some pages.
-  invalidatePagesCache({ reason: "dream" });
-  await recallSearch();
-  const msg =
-    data && typeof data === "object"
-      ? `Dream done. Candidates ${data.candidates ?? "?"}, proposed ${data.proposed ?? "?"}, updated ${data.updated ?? 0}. Diary: ${data.diaryPageId || "(none)"}.`
-      : "Dream done.";
-  setStatus(msg, "success");
+  if (dreamInFlight) return;
+  dreamInFlight = true;
+  try {
+    setStatus("Dreaming...", "secondary");
+    const data = await apiFetch("/api/dream", { method: "POST", body: { limit: 8 } });
+    // Refresh caches and UI lists after the dream changed some pages.
+    invalidatePagesCache({ reason: "dream" });
+    await recallSearch();
+    const msg =
+      data && typeof data === "object"
+        ? `Dream done. Candidates ${data.candidates ?? "?"}, proposed ${data.proposed ?? "?"}, updated ${data.updated ?? 0}. Diary: ${data.diaryPageId || "(none)"}.`
+        : "Dream done.";
+    setStatus(msg, "success");
+  } finally {
+    dreamInFlight = false;
+  }
 }
 
 init();

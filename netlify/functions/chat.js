@@ -383,8 +383,7 @@ function agentProtocolText({ allowWebSearch } = {}) {
     "(Goal: minimize the number of generateContent calls per user message.)\n\n" +
     "Counting rules (IMPORTANT):\n" +
     "- If the user asks to COUNT pages matching simple filters (text substring, tag, thread_id, kv_tags), use search_pages with {count_only:true}.\n" +
-    "- Avoid sql_select unless PostgREST filters cannot express the query.\n" +
-    "- sql_select requires SUPABASE_DB_URL on the server; if missing, you must not call it.\n\n" +
+    "\n" +
     "Notes:\n" +
     "- Use tools only when needed. Prefer minimal steps.\n" +
     "- For writes (create/update/delete), be explicit and cautious.\n" +
@@ -533,43 +532,7 @@ exports.handler = async (event, context) => {
 
     if (!threadId) threadId = crypto.randomUUID();
 
-    // Fast-path: if the user pastes {"sql":"SELECT ..."} treat it as a direct sql_select call.
-    // Purpose: avoid wasting Gemini quota/latency for trivial developer queries.
-    // Safety: still uses the allowlisted tool which enforces SELECT/CTE-only.
-    try {
-      const direct = JSON.parse(message);
-      if (direct && typeof direct === "object" && !Array.isArray(direct) && typeof direct.sql === "string") {
-        const sqlText = String(direct.sql || "").trim();
-        // Special-case: counts over tags can be done via PostgREST (no direct Postgres needed).
-        // Supports: SELECT count(*) FROM pages WHERE 'tag' = ANY(tags)
-        const m = sqlText.match(
-          /^select\s+count\s*\(\s*\*\s*\)\s+from\s+pages\s+where\s+'([^']+)'\s*=\s*any\s*\(\s*tags\s*\)\s*$/i
-        );
-        // Special-case: counts over content substring can be done via PostgREST too.
-        // Supports: SELECT count(*) FROM pages WHERE content_md ILIKE '%term%'
-        const m2 = sqlText.match(
-          /^select\s+count\s*\(\s*\*\s*\)\s+from\s+pages\s+where\s+content_md\s+ilike\s+'%([^']+)%'\s*$/i
-        );
-        let result;
-        if (m && m[1]) {
-          result = await executeTool("search_pages", { tag: m[1], count_only: true, limit: 1 }, { allowSecrets, allowWebSearch: useWebSearch });
-        } else if (m2 && m2[1]) {
-          result = await executeTool("search_pages", { q: m2[1], count_only: true, limit: 1 }, { allowSecrets, allowWebSearch: useWebSearch });
-        } else {
-          const args = { sql: sqlText, ...(direct.max_rows != null ? { max_rows: direct.max_rows } : {}) };
-          result = await executeTool("sql_select", args, { allowSecrets, allowWebSearch: useWebSearch });
-        }
-        return json(200, {
-          thread_id: threadId,
-          reply: "```json\n" + JSON.stringify(result, null, 2) + "\n```",
-          meta: { direct_tool: "sql_select" },
-          created_pages: [],
-          saved: { userPageId: null, assistantPageId: null, agentStepIds: [] },
-        });
-      }
-    } catch {
-      // Not JSON (or not a direct sql_select payload) -> proceed with normal chat flow.
-    }
+    // NOTE: intentionally no direct "raw SQL" shortcut in chat.
 
     const tCtx = t0();
     const systemPrompt = await loadSystemPromptText();
@@ -694,13 +657,6 @@ exports.handler = async (event, context) => {
         if (!name) throw new Error("Agent tool_call.name is required");
 
         // Tool arg normalization (robustness against small schema mistakes from the model).
-        // The most common is sql_select using {"query": "..."} instead of {"sql": "..."}.
-        if (name === "sql_select") {
-          if (args && typeof args === "object" && !Array.isArray(args)) {
-            if (typeof args.sql !== "string" && typeof args.query === "string") args.sql = args.query;
-            if (typeof args.sql !== "string" && typeof args.statement === "string") args.sql = args.statement;
-          }
-        }
 
         // Optional: allow the model to include a plan alongside the tool call (saves one extra Gemini call).
         const planText = typeof agent.plan === "string" ? agent.plan.trim() : "";
@@ -763,6 +719,18 @@ exports.handler = async (event, context) => {
         // Purpose: if the agent never returns a final answer (iteration cap / timeout),
         // we still return something explicit to the UI instead of an empty reply.
         lastToolResultText = resultText;
+
+        if (name === "delete_thread" && ok) {
+          // IMPORTANT: delete_thread deletes *chat pages for the thread. If we save a tool_result or final bubble
+          // after this, we'd immediately recreate a *chat page and the thread would still appear.
+          return json(200, {
+            thread_id: threadId,
+            reply: resultText,
+            meta: null,
+            created_pages: [],
+            saved: { userPageId, assistantPageId: null, agentStepIds: [] },
+          });
+        }
 
         const resultPageId = await saveChatBubble({
           threadId,
