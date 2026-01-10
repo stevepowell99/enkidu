@@ -16,3 +16,4 @@ memories/_source_embeddings.json
 
 # Local Netlify folder
 .netlify
+.env-my-secrets.txt
