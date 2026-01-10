@@ -239,7 +239,7 @@ async function loadSystemPromptText() {
 
 async function loadPreferenceBasePagesText() {
   // Purpose: load the most recent preference base pages (kept small to avoid OOM on Cloud Run).
-  const tags = ["*style", "*bio", "*strategy", "*habits", "*preference"];
+  const tags = ["*style", "*bio", "*strategy", "*habits", "*preference", "*lesson"];
   const parts = [];
   for (const t of tags) {
     const rows = await supabaseRequest("pages", {
@@ -377,9 +377,14 @@ function agentProtocolText({ allowWebSearch } = {}) {
     "You MUST respond with a single JSON object containing the key \"enkidu_agent\".\n" +
     "No prose outside that JSON.\n\n" +
     "Allowed response types:\n" +
-    "- plan: {\"enkidu_agent\":{\"type\":\"plan\",\"text\":\"...\"}}\n" +
     "- tool_call: {\"enkidu_agent\":{\"type\":\"tool_call\",\"id\":\"...\",\"name\":\"...\",\"args\":{...},\"plan\":\"...\"}}\n" +
     "- final: {\"enkidu_agent\":{\"type\":\"final\",\"text\":\"...\"}}\n\n" +
+    "IMPORTANT: Do NOT respond with type \"plan\". If you need a plan, put it in tool_call.plan.\n" +
+    "(Goal: minimize the number of generateContent calls per user message.)\n\n" +
+    "Counting rules (IMPORTANT):\n" +
+    "- If the user asks to COUNT pages matching simple filters (text substring, tag, thread_id, kv_tags), use search_pages with {count_only:true}.\n" +
+    "- Avoid sql_select unless PostgREST filters cannot express the query.\n" +
+    "- sql_select requires SUPABASE_DB_URL on the server; if missing, you must not call it.\n\n" +
     "Notes:\n" +
     "- Use tools only when needed. Prefer minimal steps.\n" +
     "- For writes (create/update/delete), be explicit and cautious.\n" +
@@ -397,8 +402,19 @@ exports.handler = async (event, context) => {
   // Netlify dev hard-times out at 30s; never let upstream fetches run longer than that.
   // (User may set ENKIDU_HTTP_TIMEOUT_MS higher; clamp it here for chat.)
   const existingTimeout = Number(process.env.ENKIDU_HTTP_TIMEOUT_MS || 20000);
-  const clampedTimeout = Math.min(Number.isFinite(existingTimeout) ? existingTimeout : 20000, 25000);
+  const isNetlifyDev =
+    ["1", "true", "yes"].includes(String(process.env.NETLIFY_DEV || "").trim().toLowerCase()) ||
+    ["1", "true", "yes"].includes(String(process.env.NETLIFY_LOCAL || "").trim().toLowerCase());
+  // Purpose: lambda-local has a hard 30s wall; keep enough budget for multiple sequential calls.
+  // NOTE: 12s was too aggressive in practice (Gemini frequently takes longer even for simple prompts).
+  // Keep this below the ~30s lambda-local wall, but give Gemini a fair chance to respond.
+  const maxUpstreamMs = isNetlifyDev ? 25000 : 25000;
+  const clampedTimeout = Math.min(Number.isFinite(existingTimeout) ? existingTimeout : 20000, maxUpstreamMs);
   process.env.ENKIDU_HTTP_TIMEOUT_MS = String(clampedTimeout);
+  // Netlify dev (lambda-local) has a hard 30s wall-clock timeout for the whole function.
+  // Keep chat usable by avoiding multi-round Gemini loops when tools are involved.
+  const startedAtMs = Date.now();
+  const netlifyDevHardBudgetMs = 28000; // leave a little room for JSON/stringify + response
 
   const debugTimings = String(process.env.ENKIDU_DEBUG_TIMINGS || "").trim() === "1";
   function t0() {
@@ -439,6 +455,44 @@ exports.handler = async (event, context) => {
     assertNoSecrets(message, { allow: allowSecrets });
 
     if (!threadId) threadId = crypto.randomUUID();
+
+    // Fast-path: if the user pastes {"sql":"SELECT ..."} treat it as a direct sql_select call.
+    // Purpose: avoid wasting Gemini quota/latency for trivial developer queries.
+    // Safety: still uses the allowlisted tool which enforces SELECT/CTE-only.
+    try {
+      const direct = JSON.parse(message);
+      if (direct && typeof direct === "object" && !Array.isArray(direct) && typeof direct.sql === "string") {
+        const sqlText = String(direct.sql || "").trim();
+        // Special-case: counts over tags can be done via PostgREST (no direct Postgres needed).
+        // Supports: SELECT count(*) FROM pages WHERE 'tag' = ANY(tags)
+        const m = sqlText.match(
+          /^select\s+count\s*\(\s*\*\s*\)\s+from\s+pages\s+where\s+'([^']+)'\s*=\s*any\s*\(\s*tags\s*\)\s*$/i
+        );
+        // Special-case: counts over content substring can be done via PostgREST too.
+        // Supports: SELECT count(*) FROM pages WHERE content_md ILIKE '%term%'
+        const m2 = sqlText.match(
+          /^select\s+count\s*\(\s*\*\s*\)\s+from\s+pages\s+where\s+content_md\s+ilike\s+'%([^']+)%'\s*$/i
+        );
+        let result;
+        if (m && m[1]) {
+          result = await executeTool("search_pages", { tag: m[1], count_only: true, limit: 1 }, { allowSecrets, allowWebSearch: useWebSearch });
+        } else if (m2 && m2[1]) {
+          result = await executeTool("search_pages", { q: m2[1], count_only: true, limit: 1 }, { allowSecrets, allowWebSearch: useWebSearch });
+        } else {
+          const args = { sql: sqlText, ...(direct.max_rows != null ? { max_rows: direct.max_rows } : {}) };
+          result = await executeTool("sql_select", args, { allowSecrets, allowWebSearch: useWebSearch });
+        }
+        return json(200, {
+          thread_id: threadId,
+          reply: "```json\n" + JSON.stringify(result, null, 2) + "\n```",
+          meta: { direct_tool: "sql_select" },
+          created_pages: [],
+          saved: { userPageId: null, assistantPageId: null, agentStepIds: [] },
+        });
+      }
+    } catch {
+      // Not JSON (or not a direct sql_select payload) -> proceed with normal chat flow.
+    }
 
     const tCtx = t0();
     const systemPrompt = await loadSystemPromptText();
@@ -503,6 +557,7 @@ exports.handler = async (event, context) => {
 
     // Keep this small to avoid Netlify dev lambda-local 30s timeouts.
     for (let iter = 0; iter < 4; iter++) {
+      if (isNetlifyDev && Date.now() - startedAtMs > netlifyDevHardBudgetMs) break;
       const tGem = t0();
       const raw = await geminiGenerate({ system: agentSystem, messages, model });
       logTiming("geminiGenerate", tGem);
@@ -616,6 +671,13 @@ exports.handler = async (event, context) => {
         if (resultPageId) stepIds.push(resultPageId);
         messages.push({ role: "user", text: resultText });
         stepIndex++;
+
+        // Netlify dev (lambda-local) hard time limit: don't do a second Gemini call.
+        // Return the tool result directly so the UI doesn't time out.
+        if (isNetlifyDev) {
+          finalText = resultText;
+          break;
+        }
 
         // IMPORTANT (netlify dev 30s timeout): for write tools, don't require an extra model call.
         // We already did the work and persisted the call+result bubbles; return a short final message.

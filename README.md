@@ -19,7 +19,7 @@ Enkidu
 - Basically 2 parts to the UI: a standard chat bot (which also restores from history) and a "recall" panel to find and display past pages
 - There also are a smallish but extensible number of high-level **base pages** (they are just normal pages distinguished by tags) e.g.
   - `*system` (system prompt)
-  - `*style` / `*bio` / `*strategy` (preference base pages)
+  - `*style` / `*bio` / `*strategy` / `*lesson` (preference base pages)
   - `*dream-prompt` (dreaming instructions)
   - `*split-prompt` (instructions for splitting content into multiple pages)
 - As much as possible, functionality is provided by soft-coding via these base pages, i.e. user and Enkidu can change/adapt them on the fly
@@ -104,14 +104,14 @@ Enkidu
 - **Base pages (soft-coded prompts/preferences)**
   - All are just normal pages; behaviour is driven by tags:
     - `*system` (system prompt; most recent wins)
-    - `*style`, `*bio`, `*strategy` (preference base pages; a few recent are concatenated)
+    - `*style`, `*bio`, `*strategy`, `*lesson` (preference base pages; a few recent are concatenated)
     - `*dream-prompt` (dreaming instructions; used by `/api/dream`)
     - `*split-prompt` (reserved for future “split into pages” UX; currently excluded from normal chat injection)
 - **Behavioral tags + KV tags (current)**
   - **Plain tags that change behaviour**
     - `*chat`: marks chat message pages; used for thread listing + UI thread reload/related-by-default.
     - `*system`: base page for the system prompt; most recent wins; excluded from Dream candidates.
-    - `*style`, `*bio`, `*strategy`, `*habits`, `*preference`: preference base pages injected into chat (recent few concatenated). `*preference` is also excluded from Dream candidates.
+    - `*style`, `*bio`, `*strategy`, `*habits`, `*preference`, `*lesson`: preference base pages injected into chat (recent few concatenated). `*preference` is also excluded from Dream candidates.
     - `*dream-prompt`: Dream instructions page used by `POST /api/dream`; excluded from normal chat injection and from Dream candidates.
     - `*split-prompt`: reserved for future “split into pages” UX; excluded from normal chat injection.
     - `*dream-diary`: pages written by Dreaming to summarise what changed; excluded from Dream candidates.
@@ -165,6 +165,7 @@ Enkidu
    - Schema: `supabase/schema.sql` enables `vector` and adds `embedding vector(768)` + `embedding_model` + `embedding_updated_at`.
    - Backend: Netlify functions write embeddings on every insert/update that touches `public.pages`.
    - Existing pages: run `POST /api/backfill-embeddings?limit=25` repeatedly until it reports fewer than `limit` updated.
+   - Background backfill: `netlify/functions/backfill-embeddings-cron.js` runs every 15 minutes and embeds up to `ENKIDU_EMBEDDING_BACKFILL_LIMIT` pages (default 25).
 
 ## Requirements
 - Node.js 18+
@@ -208,6 +209,27 @@ netlify dev
 
 Then open `http://localhost:8888` (Netlify’s default) and paste the same admin token into the UI.
 
+## Definitive request routing map (UI → API)
+
+The UI (in `public/app.js`) always calls API paths like `/api/chat`, `/api/pages`, etc. Where those calls go depends on the **API base** setting in the UI:
+
+- **API base blank** (default): calls go to the **same origin** as the UI (relative `/api/...`).
+  - If the UI is served by Netlify (production) this hits Netlify redirects → Netlify Functions.
+  - If the UI is served by `netlify dev` (local) this hits lambda-local → Netlify Functions.
+- **API base set** (e.g. your Cloud Run URL): calls go to that **API origin** (cross-origin), e.g. `https://<service>-<hash>-<region>.a.run.app/api/...`.
+
+Concretely:
+
+- **Netlify-hosted UI + Netlify Functions API (default “all on Netlify”)**
+  - Browser → `https://<your-netlify-site>/api/...`
+  - `netlify.toml` redirects `/api/*` → `/.netlify/functions/:splat`
+  - Netlify Function runs (`netlify/functions/*.js`)
+- **Netlify-hosted UI + Cloud Run API (recommended to avoid serverless timeouts)**
+  - In the UI top bar, set **API base** to your Cloud Run origin and click **Save**
+  - Browser → `https://<cloud-run-origin>/api/...`
+  - Cloud Run runs `server/index.js` (Express) which forwards to the same handlers under `netlify/functions/`
+  - You must set `ENKIDU_CORS_ORIGIN` to allow the UI origin(s)
+
 ## Hosting (Netlify + Supabase) (git-push deploy)
 
 ### Supabase
@@ -232,6 +254,13 @@ If you hit local dev / serverless time limits (LLM calls can be slow), you can r
 
 - **UI**: keep hosting `public/` on Netlify (static).
 - **API**: deploy the Node server in `server/index.js` to Cloud Run.
+
+### Critical UI setting (Cloud Run)
+If your UI is on Netlify (or `netlify dev`) and your API is on Cloud Run, you **must** set the UI top-bar field:
+
+- **API base** = `https://<your-cloud-run-service>.a.run.app`
+
+(If you leave it blank, the UI will keep calling same-origin `/api/...` which routes to Netlify Functions / lambda-local instead of Cloud Run.)
 
 ### Env vars (Cloud Run)
 Set the same env vars you use for Netlify Functions:
@@ -262,6 +291,42 @@ For cross-origin calls from the Netlify UI to Cloud Run, set:
 ## Additional Scripts
 
 These live under `scripts/` and are optional helpers for one-off ingestion tasks.
+
+### Import Zotero BibTeX (.bib) into pages (upsert)
+
+File: `scripts/import_zotero_bib_to_pages.py`
+
+**What it does**
+- **1 page per BibTeX entry**
+- Uses `kv_tags.source="zotero"` + `kv_tags.zotero_citekey="<citekey>"` to identify items.
+- Reruns **upsert**:
+  - creates new pages for new citekeys
+  - updates existing pages only when the BibTeX record changed (`kv_tags.zotero_source_hash`)
+
+**Required environment variables**
+- `ENKIDU_BASE_URL` (**API origin**, not “the UI site”), e.g.:
+  - Netlify Functions API: `https://enkidu-agent.netlify.app`
+  - Cloud Run API: `https://<your-cloud-run-service>.a.run.app`
+- `ENKIDU_ADMIN_TOKEN` (same token you paste into the UI)
+
+**Optional environment variables**
+- `ENKIDU_ALLOW_SECRETS="1"` (passes `x-enkidu-allow-secrets: 1`)
+- `ENKIDU_SKIP_EMBEDDINGS="1"` (passes `x-enkidu-skip-embeddings: 1` to speed up large imports/updates)
+  - If you do this, you can backfill embeddings later via `POST /api/backfill-embeddings?limit=25` (repeat until done).
+
+**Usage (PowerShell)**
+
+```powershell
+$env:ENKIDU_BASE_URL="https://enkidu-agent.netlify.app"
+$env:ENKIDU_ADMIN_TOKEN="YOUR_ADMIN_TOKEN"
+python scripts/import_zotero_bib_to_pages.py "C:/Users/Zoom/Zotero-cm/My Library.bib"
+```
+
+**Start fresh (dangerous)**
+
+```powershell
+python scripts/import_zotero_bib_to_pages.py --purge-existing "C:/Users/Zoom/Zotero-cm/My Library.bib"
+```
 
 ### Clean Raindrop HTML export (remove extra consecutive link rows)
 

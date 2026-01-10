@@ -22,12 +22,16 @@ function getSupabaseConfig() {
   return { url: url.replace(/\/+$/, ""), key };
 }
 
-async function supabaseRequest(path, { method = "GET", body, query = "" } = {}) {
+async function supabaseRequest(path, { method = "GET", body, query = "", returnRepresentation, preferExtras } = {}) {
   const { url, key } = getSupabaseConfig();
 
   // Purpose: PostgREST returns minimal responses for writes unless Prefer is set.
   // We rely on returned rows (e.g., new page id) in the UI.
-  const preferReturnRepresentation = method && String(method).toUpperCase() !== "GET";
+  const preferReturnRepresentation =
+    returnRepresentation !== undefined
+      ? Boolean(returnRepresentation)
+      : method && String(method).toUpperCase() !== "GET";
+  const extras = Array.isArray(preferExtras) ? preferExtras.filter(Boolean) : [];
 
   const timeoutMs = Number(process.env.ENKIDU_HTTP_TIMEOUT_MS || 20000);
   const controller = new AbortController();
@@ -41,7 +45,10 @@ async function supabaseRequest(path, { method = "GET", body, query = "" } = {}) 
         apikey: key,
         authorization: `Bearer ${key}`,
         "content-type": "application/json",
-        ...(preferReturnRepresentation ? { Prefer: "return=representation" } : {}),
+        Prefer: [
+          ...(extras.length ? extras : []),
+          preferReturnRepresentation ? "return=representation" : "return=minimal",
+        ].join(", "),
       },
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: controller.signal,
@@ -66,7 +73,62 @@ async function supabaseRequest(path, { method = "GET", body, query = "" } = {}) 
   return text ? JSON.parse(text) : null;
 }
 
-module.exports = { supabaseRequest };
+async function supabaseRequestMeta(
+  path,
+  { method = "GET", body, query = "", returnRepresentation, count, acceptJson = true, preferExtras } = {}
+) {
+  const { url, key } = getSupabaseConfig();
+
+  const preferParts = [];
+  const extras = Array.isArray(preferExtras) ? preferExtras.filter(Boolean) : [];
+  if (extras.length) preferParts.push(...extras);
+  if (count) preferParts.push(`count=${count}`);
+  const preferReturn =
+    returnRepresentation !== undefined
+      ? Boolean(returnRepresentation)
+      : method && String(method).toUpperCase() !== "GET";
+  preferParts.push(preferReturn ? "return=representation" : "return=minimal");
+
+  const timeoutMs = Number(process.env.ENKIDU_HTTP_TIMEOUT_MS || 20000);
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
+
+  let res;
+  try {
+    res = await fetch(`${url}/rest/v1/${path}${query}`, {
+      method,
+      headers: {
+        apikey: key,
+        authorization: `Bearer ${key}`,
+        ...(acceptJson ? { accept: "application/json" } : {}),
+        "content-type": "application/json",
+        Prefer: preferParts.join(", "),
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    const msg = String(err?.message || err);
+    if (msg.toLowerCase().includes("aborted")) {
+      throw new Error(`Supabase request timed out after ${timeoutMs}ms: ${path}${query}`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(t);
+  }
+
+  const text = await res.text();
+  if (!res.ok) {
+    const msg = text || `${res.status} ${res.statusText}`;
+    throw new Error(`Supabase error: ${msg}`);
+  }
+
+  const headers = Object.fromEntries(res.headers.entries());
+  const data = text ? JSON.parse(text) : null;
+  return { data, headers, status: res.status };
+}
+
+module.exports = { supabaseRequest, supabaseRequestMeta };
 
 
 

@@ -380,6 +380,13 @@ def _source_hash(entry: BibEntry) -> str:
     return hashlib.sha1(raw).hexdigest()
 
 
+def _chunked(xs: list[Any], n: int) -> list[list[Any]]:
+    # Purpose: keep request size/time bounded for bulk API calls.
+    if n <= 0:
+        return [xs]
+    return [xs[i : i + n] for i in range(0, len(xs), n)]
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="Import Zotero BibTeX .bib into Enkidu pages via /api/pages.")
     p.add_argument("bib_path", type=Path, help="Path to Zotero .bib file")
@@ -396,6 +403,7 @@ def main() -> int:
     base_url = _env_required("ENKIDU_BASE_URL").rstrip("/")
     admin_token = _env_required("ENKIDU_ADMIN_TOKEN")
     allow_secrets = os.environ.get("ENKIDU_ALLOW_SECRETS", "").strip() == "1"
+    skip_embeddings = os.environ.get("ENKIDU_SKIP_EMBEDDINGS", "").strip() == "1"
 
     raw = args.bib_path.read_text(encoding="utf-8", errors="replace")
     entries = parse_bibtex(raw)
@@ -403,9 +411,12 @@ def main() -> int:
         print("No BibTeX entries found.")
         return 0
 
+    print(f"Using ENKIDU_BASE_URL={base_url}")
     common_headers = {"authorization": f"Bearer {admin_token}"}
     if allow_secrets:
         common_headers["x-enkidu-allow-secrets"] = "1"
+    if skip_embeddings:
+        common_headers["x-enkidu-skip-embeddings"] = "1"
 
     # Build a map of existing Zotero pages by citekey so reruns can update in-place.
     # IMPORTANT: Supabase/PostgREST often caps responses at 1000 rows, regardless of requested limit,
@@ -421,15 +432,35 @@ def main() -> int:
     seen_first_ids: set[str] = set()
 
     while fetched < MAX_EXISTING:
-        data = _http_json(
-            url=(
-                f"{base_url}/api/pages"
-                f"?limit={PAGE_SIZE}&offset={offset}"
-                f"&kv_key={urllib.parse.quote('source')}&kv_value={urllib.parse.quote('zotero')}"
-            ),
-            method="GET",
-            headers=common_headers,
-        )
+        try:
+            data = _http_json(
+                url=(
+                    f"{base_url}/api/pages"
+                    f"?limit={PAGE_SIZE}&offset={offset}"
+                    f"&kv_key={urllib.parse.quote('source')}&kv_value={urllib.parse.quote('zotero')}"
+                ),
+                method="GET",
+                headers=common_headers,
+            )
+        except RuntimeError as e:
+            msg = str(e)
+            if "API error 401" in msg or "401" in msg:
+                # Try to surface the server's debug hint (it appends JSON after a newline).
+                hint = ""
+                if "\n" in msg:
+                    hint = msg.split("\n", 1)[1].strip()
+                client_len = len(f"Bearer {admin_token}".strip())
+                print(
+                    "ERROR: Unauthorized (401). The ENKIDU_ADMIN_TOKEN used by this script does not match the server.\n"
+                    "- If ENKIDU_BASE_URL points at your deployed site, use the SAME admin token you configured in Netlify.\n"
+                    "- If you pasted the token into Netlify with extra spaces/commas, the server only uses the first segment before whitespace/comma.\n"
+                    "- Ensure your PowerShell env var (or repo .env) matches exactly.\n"
+                    f"- Client Authorization header length: {client_len}\n"
+                    f"- Server hint (if provided): {hint or '(none)'}",
+                    file=sys.stderr,
+                )
+                return 2
+            raise
         existing_pages = (data or {}).get("pages", []) or []
         if not existing_pages:
             break
@@ -468,21 +499,32 @@ def main() -> int:
         )
 
     if args.purge_existing and existing_by_citekey:
-        # Purpose: allow a clean reimport if you accidentally created duplicates or want to restart.
-        ids_to_delete = [str(p.get("id") or "").strip() for p in existing_by_citekey.values()]
-        ids_to_delete = [i for i in ids_to_delete if i]
-        print(f"Purging {len(ids_to_delete)} existing Zotero pages...")
-        deleted = 0
-        for pid in ids_to_delete:
-            _http_text(
-                url=f"{base_url}/api/page?id={urllib.parse.quote(pid)}",
+        # Purpose: allow a clean reimport (single bulk delete; much faster than 1000s of per-page deletes).
+        print("Purging existing Zotero pages (bulk delete)...")
+        try:
+            res = _http_json(
+                url=(
+                    f"{base_url}/api/pages"
+                    f"?confirm=1"
+                    f"&kv_key={urllib.parse.quote('source')}&kv_value={urllib.parse.quote('zotero')}"
+                ),
                 method="DELETE",
                 headers=common_headers,
-            )
-            deleted += 1
-            if deleted % 50 == 0:
-                print(f"Deleted {deleted} pages...")
-        print(f"Purged {deleted} Zotero pages.")
+            ) or {}
+        except RuntimeError as e:
+            msg = str(e)
+            if "API error 405" in msg or "405" in msg:
+                print(
+                    "ERROR: your current backend does not support bulk delete yet (DELETE /api/pages returned 405 Method Not Allowed).\n"
+                    "You need to redeploy the updated Netlify Functions (or point ENKIDU_BASE_URL at your local netlify dev) and retry.",
+                    file=sys.stderr,
+                )
+                return 2
+            raise
+        if isinstance(res, dict) and res.get("ok") is True:
+            print(f"Purged existing Zotero pages. Deleted {res.get('deleted')} (before={res.get('before')}, after={res.get('after')}).")
+        else:
+            print(f"Purged existing Zotero pages. (Unexpected response: {res!r})")
         existing_by_citekey = {}
         duplicate_citekeys = set()
 
@@ -500,6 +542,8 @@ def main() -> int:
             + "\n".join(sorted(duplicate_citekeys)),
             file=sys.stderr,
         )
+
+    to_upsert: list[dict[str, Any]] = []
 
     for entry in entries:
         new_import_id = _stable_import_id(entry)
@@ -522,23 +566,14 @@ def main() -> int:
 
         existing_page = existing_by_citekey.get(entry.citekey)
         if not existing_page:
-            _http_json(
-                url=f"{base_url}/api/pages",
-                method="POST",
-                headers=common_headers,
-                body_obj={
+            to_upsert.append(
+                {
                     "title": title,
                     "content_md": content_md,
                     "tags": ["zotero"],
                     "kv_tags": kv_tags,
-                    "thread_id": None,
-                    "next_page_id": None,
-                },
+                }
             )
-            imported += 1
-            existing_by_citekey[entry.citekey] = {"kv_tags": kv_tags}
-            if imported % 25 == 0:
-                print(f"Imported {imported} pages...")
             continue
 
         # Update only if the Zotero source hash changed (or is missing).
@@ -557,20 +592,31 @@ def main() -> int:
             skipped_duplicates += 1
             continue
 
-        _http_json(
-            url=f"{base_url}/api/page?id={urllib.parse.quote(page_id)}",
-            method="PUT",
-            headers=common_headers,
-            body_obj={
+        to_upsert.append(
+            {
+                "id": page_id,
                 "title": title,
                 "content_md": content_md,
                 "tags": ["zotero"],
                 "kv_tags": merged_kv,
-            },
+            }
         )
-        updated += 1
-        if updated % 25 == 0:
-            print(f"Updated {updated} pages...")
+
+    # Bulk upsert in chunks (one HTTP call per chunk).
+    # Requires backend support for POST /api/pages with {pages:[...]} and x-enkidu-skip-embeddings: 1.
+    if to_upsert:
+        chunks = _chunked(to_upsert, 250)
+        for idx, chunk in enumerate(chunks, start=1):
+            _http_json(
+                url=f"{base_url}/api/pages",
+                method="POST",
+                headers=common_headers,
+                body_obj={"pages": chunk},
+            )
+            # Best-effort progress: count inserts vs updates in the chunk.
+            imported += sum(1 for p in chunk if not p.get("id"))
+            updated += sum(1 for p in chunk if p.get("id"))
+            print(f"Bulk upsert {idx}/{len(chunks)}: processed {len(chunk)} pages...")
 
     print(f"Done. Imported {imported} pages. Updated {updated} pages. Unchanged {unchanged} pages.")
     return 0

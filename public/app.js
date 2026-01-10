@@ -505,6 +505,106 @@ async function apiFetch(path, { method = "GET", body } = {}) {
   return json;
 }
 
+// -------------------------
+// Chat in-flight guard
+// -------------------------
+// Purpose: In `netlify dev` (lambda-local) long /api/chat requests can get cut off when the UI fires other
+// concurrent API calls (e.g. opening a Related page triggers /api/page). Keep this simple: while chat is
+// in-flight, block page-open actions to avoid terminating the chat request.
+let chatInFlight = false;
+
+// -------------------------
+// Idle detector (for background embedding backfill)
+// -------------------------
+// Purpose: only backfill embeddings when the user is idle, and stop immediately when they become active.
+let lastUserActivityAtMs = Date.now();
+let autoBackfillController = null;
+function markUserActivity() {
+  lastUserActivityAtMs = Date.now();
+  // Stop any background backfill as soon as the user interacts again.
+  if (autoBackfillController) {
+    try {
+      autoBackfillController.abort();
+    } catch {
+      // ignore
+    }
+    autoBackfillController = null;
+  }
+}
+
+function setChatInFlight(on) {
+  chatInFlight = !!on;
+  const btn = $("sendChat");
+  if (btn) btn.disabled = chatInFlight; // prevent double-send while a request is active
+}
+
+async function autoBackfillEmbeddingsOnce() {
+  // Purpose: run a tiny backfill batch using AbortController so we can pause on user activity.
+  const token = getToken();
+  if (!token) return;
+  const base = getApiBaseUrl();
+  const url = base ? `${base}/api/backfill-embeddings?limit=1` : "/api/backfill-embeddings?limit=1";
+
+  autoBackfillController = new AbortController();
+  try {
+    await fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${token}`,
+      },
+      body: "{}",
+      signal: autoBackfillController.signal,
+    });
+  } finally {
+    autoBackfillController = null;
+  }
+}
+
+async function refreshEmbeddingStatus() {
+  // Purpose: small top-bar notification so you can see background embedding backfill is working.
+  // If the scheduled backfill is running, missing count should drift toward 0 over time.
+  const el = document.getElementById("embeddingStatus");
+  if (!el) return;
+  if (!getToken()) {
+    el.textContent = "Embeddings: (no token)";
+    el.className = "badge text-bg-secondary";
+    return;
+  }
+  try {
+    const data = await apiFetch("/api/embeddings-status");
+    const n = Number(data?.missing_embeddings);
+    if (!Number.isFinite(n)) throw new Error("Bad embeddings-status response");
+    // Drain backlog only when idle (pause as soon as the user interacts).
+    if (n > 0 && !chatInFlight) {
+      const now = Date.now();
+      if (!window.__enkiduLastAutoBackfillAtMs) window.__enkiduLastAutoBackfillAtMs = 0;
+      const idleMs = now - lastUserActivityAtMs;
+      if (idleMs > 120_000 && now - window.__enkiduLastAutoBackfillAtMs > 60_000) {
+        window.__enkiduLastAutoBackfillAtMs = now;
+        autoBackfillEmbeddingsOnce().catch(() => {});
+      }
+    }
+    if (n <= 0) {
+      el.textContent = "Embeddings: OK";
+      el.className = "badge text-bg-success";
+    } else {
+      el.textContent = `Embeddings missing: ${n}`;
+      el.className = "badge text-bg-warning";
+    }
+  } catch {
+    // Keep UI calm; just show unknown on transient errors.
+    el.textContent = "Embeddings: ?";
+    el.className = "badge text-bg-secondary";
+  }
+}
+
+function startEmbeddingStatusPoll() {
+  // Purpose: poll lightly; keep it cheap.
+  refreshEmbeddingStatus().catch(() => {});
+  setInterval(() => refreshEmbeddingStatus().catch(() => {}), 30000);
+}
+
 function setModelOptions(models) {
   const sel = $("chatModel");
   sel.innerHTML = "";
@@ -1154,6 +1254,10 @@ async function ensureRecentPagesCache() {
 
 async function openPageById(pageId) {
   // Purpose: centralise "open this page in the editor" for wikilinks and list clicks.
+  if (chatInFlight) {
+    setStatus("Chat request in progress — wait for reply before opening pages.", "secondary");
+    return;
+  }
   setStatus("Loading page...", "secondary");
   const one = await apiFetch(`/api/page?id=${encodeURIComponent(pageId)}`);
   setSelectedPage(one.page, { newMode: false });
@@ -1483,7 +1587,7 @@ function renderRecallResults(pages) {
     } else {
       btn.style.borderRightColor = "rgba(108, 117, 125, 0.18)"; // Bootstrap "secondary" gray
     }
-    btn.onclick = () => openPageById(p.id);
+    btn.onclick = () => openPageById(p.id).catch((err) => setStatus(err.message, "danger"));
 
     row.appendChild(cb);
     row.appendChild(btn);
@@ -1871,6 +1975,7 @@ async function reloadThread() {
 }
 
 async function sendChat() {
+  if (chatInFlight) return; // prevent overlapping sends
   const msg = $("chatInput").value || "";
   const threadId = ($("threadSelect").value || "").trim();
   if (!msg.trim()) return;
@@ -1899,6 +2004,7 @@ async function sendChat() {
   const use_web_search = !!$("useWebSearch")?.checked;
   const context_page_ids = Array.from(selectedPayloadIds);
   let data;
+  setChatInFlight(true);
   try {
     data = await apiFetch("/api/chat", {
       method: "POST",
@@ -1908,6 +2014,8 @@ async function sendChat() {
     // Purpose: if send fails, remove the optimistic bubble so the log matches reality.
     optimisticEl?.remove();
     throw e;
+  } finally {
+    setChatInFlight(false);
   }
 
   // If the assistant created split pages, backfill embeddings in a separate call
@@ -1935,6 +2043,12 @@ function newThread() {
 // -------------------------
 
 function init() {
+  // Track "activity" broadly so background backfill only runs when you're idle.
+  // (Keep it simple: any interaction resets the idle timer and aborts any in-flight auto-backfill.)
+  for (const ev of ["pointerdown", "keydown", "wheel", "touchstart", "input", "focusin"]) {
+    window.addEventListener(ev, markUserActivity, { passive: true });
+  }
+
   initClearButtons();
   initKvTagsBuilder();
   $("adminToken").value = getToken();
@@ -2333,6 +2447,9 @@ function init() {
     })().catch(() => {});
     ensureRecentPagesCache().catch(() => {});
   }
+
+  // Always start status polling (it will show "(no token)" until token is saved).
+  startEmbeddingStatusPoll();
 
 }
 

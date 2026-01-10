@@ -59,19 +59,26 @@ exports.handler = async (event) => {
 
     let updated = 0;
     const ids = [];
+    const failed = [];
 
     for (const r of rows || []) {
       const id = String(r?.id || "");
       if (!id) continue;
-      await updatePageEmbedding({ id, content_md: r?.content_md || "" });
-      updated++;
-      ids.push(id);
+      try {
+        await updatePageEmbedding({ id, content_md: r?.content_md || "" });
+        updated++;
+        ids.push(id);
+      } catch (err) {
+        // Purpose: don't let one bad page block the rest of the batch/backlog.
+        failed.push({ id, error: String(err?.message || err) });
+      }
     }
 
     return json(200, {
       scanned: (rows || []).length,
       updated,
       ids,
+      failed,
       remaining_hint: updated === limit ? "More remain. Call again to process next batch." : "Done (no more null embeddings in this batch).",
     });
   } catch (err) {

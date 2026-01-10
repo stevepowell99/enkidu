@@ -5,7 +5,7 @@
 // - Tool execution happens server-side; the model only requests tool calls.
 // - We keep this dependency-light (Supabase via PostgREST).
 
-const { supabaseRequest } = require("./_supabase");
+const { supabaseRequest, supabaseRequestMeta } = require("./_supabase");
 const { assertNoSecrets } = require("./_secrets");
 const { makeEmbeddingFields } = require("./_embeddings");
 const { geminiGenerate } = require("./_gemini");
@@ -27,7 +27,23 @@ function getPgPool() {
   if (!Pool) throw new Error('sql_select requires npm dependency "pg" (run npm install)');
   const url = process.env.SUPABASE_DB_URL || process.env.ENKIDU_DB_URL || "";
   if (!url) throw new Error("Missing SUPABASE_DB_URL (or ENKIDU_DB_URL)");
-  if (!pgPool) pgPool = new Pool({ connectionString: url, max: 1 });
+  if (!pgPool) {
+    // Purpose: avoid lambda-local 30s hangs on bad DNS/SSL/credentials by failing fast.
+    let useSsl = false;
+    try {
+      const u = new URL(url);
+      // Supabase Postgres requires SSL.
+      useSsl = String(u.hostname || "").toLowerCase().endsWith(".supabase.co");
+    } catch {
+      useSsl = false;
+    }
+    pgPool = new Pool({
+      connectionString: url,
+      max: 1,
+      connectionTimeoutMillis: 8000,
+      ...(useSsl ? { ssl: { rejectUnauthorized: false } } : {}),
+    });
+  }
   return pgPool;
 }
 
@@ -81,6 +97,7 @@ function toolManifest({ allowWebSearch } = {}) {
           kv_key: { type: "string" },
           kv_value: { type: "string" },
           limit: { type: "number" },
+          count_only: { type: "boolean" },
         },
       },
     },
@@ -207,6 +224,7 @@ async function executeTool(name, args, { allowSecrets, allowWebSearch } = {}) {
     const q = a.q != null ? String(a.q).trim() : "";
     const kvKey = a.kv_key != null ? String(a.kv_key).trim() : "";
     const kvValue = a.kv_value != null ? String(a.kv_value).trim() : "";
+    const countOnly = a.count_only === true;
     if ((kvKey && !kvValue) || (!kvKey && kvValue)) throw new Error("kv_key and kv_value must be provided together");
 
     const filters = [];
@@ -217,6 +235,16 @@ async function executeTool(name, args, { allowSecrets, allowWebSearch } = {}) {
       const obj = { [kvKey]: kvValue };
       filters.push(`kv_tags=cs.${encodeURIComponent(JSON.stringify(obj))}`);
     }
+
+    if (countOnly) {
+      // Purpose: cheap count via PostgREST (no direct Postgres connection required).
+      const query = `?select=id&limit=1` + (filters.length ? `&${filters.join("&")}` : "");
+      const meta = await supabaseRequestMeta("pages", { method: "GET", query, count: "exact" });
+      const contentRange = String(meta.headers?.["content-range"] || "");
+      const total = Number(contentRange.split("/")[1] || "0") || 0;
+      return { count: total };
+    }
+
     const query =
       `?select=id,created_at,updated_at,thread_id,next_page_id,title,tags,kv_tags,content_md` +
       `&order=created_at.desc` +

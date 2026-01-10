@@ -37,6 +37,7 @@ exports.handler = async (event) => {
 
     if (event.httpMethod === "PUT") {
       const allowSecrets = isAllowSecrets(event);
+      const skipEmbeddings = String(event.headers?.["x-enkidu-skip-embeddings"] || "").trim() === "1";
       const body = JSON.parse(event.body || "{}");
 
       // Only allow updating these fields.
@@ -55,8 +56,11 @@ exports.handler = async (event) => {
         assertNoSecrets(patch.content_md, { allow: allowSecrets });
 
         // Embed inline so update stays fast (no extra PATCH round-trip).
-        const embed = await makeEmbeddingFields({ content_md: patch.content_md });
-        if (embed) Object.assign(patch, embed);
+        // Import scripts can opt out (explicitly) to avoid many slow embedding calls.
+        if (!skipEmbeddings) {
+          const embed = await makeEmbeddingFields({ content_md: patch.content_md });
+          if (embed) Object.assign(patch, embed);
+        }
       }
 
       const rows = await supabaseRequest(`pages`, {
