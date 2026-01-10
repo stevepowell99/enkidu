@@ -11,7 +11,14 @@ function parseLimit(raw) {
   const n = Number(raw);
   if (!Number.isFinite(n) || n <= 0) return 50;
   // Allow larger reads for client-side features like wikilink picking (still keep a hard cap).
-  return Math.min(2000, Math.floor(n));
+  return Math.min(5000, Math.floor(n));
+}
+
+function parseOffset(raw) {
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return 0;
+  // Hard cap to avoid accidental huge scans (keep it simple).
+  return Math.min(500000, Math.floor(n));
 }
 
 function parseKvValueFromQuery(raw) {
@@ -39,6 +46,7 @@ exports.handler = async (event) => {
   try {
     if (event.httpMethod === "GET") {
       const limit = parseLimit(event.queryStringParameters?.limit);
+      const offset = parseOffset(event.queryStringParameters?.offset);
       const tag = event.queryStringParameters?.tag;
       const threadId = event.queryStringParameters?.thread_id;
       const q = event.queryStringParameters?.q;
@@ -91,6 +99,7 @@ exports.handler = async (event) => {
         `?select=${select}` +
         `&order=created_at.desc` +
         `&limit=${encodeURIComponent(limit)}` +
+        (offset ? `&offset=${encodeURIComponent(offset)}` : "") +
         (filters.length ? `&${filters.join("&")}` : "");
 
       const rows = await supabaseRequest("pages", { query });

@@ -36,6 +36,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from _dotenv import load_repo_dotenv
+
 
 def _env_required(name: str) -> str:
     v = os.environ.get(name, "").strip()
@@ -51,6 +53,27 @@ def _http_json(
     headers: dict[str, str],
     body_obj: dict[str, Any] | None = None,
 ) -> Any:
+    return _http(url=url, method=method, headers=headers, body_obj=body_obj, parse_json=True)
+
+
+def _http_text(
+    *,
+    url: str,
+    method: str,
+    headers: dict[str, str],
+    body_obj: dict[str, Any] | None = None,
+) -> str:
+    return str(_http(url=url, method=method, headers=headers, body_obj=body_obj, parse_json=False) or "")
+
+
+def _http(
+    *,
+    url: str,
+    method: str,
+    headers: dict[str, str],
+    body_obj: dict[str, Any] | None,
+    parse_json: bool,
+) -> Any:
     data = None
     if body_obj is not None:
         data = json.dumps(body_obj).encode("utf-8")
@@ -60,6 +83,8 @@ def _http_json(
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
             raw = resp.read().decode("utf-8", errors="replace").strip()
+            if not parse_json:
+                return raw
             return json.loads(raw) if raw else None
     except urllib.error.HTTPError as e:
         err_txt = e.read().decode("utf-8", errors="replace")
@@ -80,6 +105,28 @@ def _file_url_from_windows_path(p: str) -> str:
         # Best-effort: still try to make a file:// URL.
         s = "file:///" + s.lstrip("/")
     return urllib.parse.quote(s, safe=":/#?&=%")
+
+
+def _split_zotero_file_field(file_field: str) -> list[str]:
+    # Purpose: Zotero BibTeX `file` fields often contain:
+    # - multiple attachments separated by ';'
+    # - BibTeX-escaped Windows paths like: C\:\\Users\\Me\\file.pdf:application/pdf
+    # We want clean per-attachment Windows paths like: C:\Users\Me\file.pdf
+    raw = (file_field or "").strip()
+    if not raw:
+        return []
+
+    parts = [p.strip() for p in raw.split(";") if p.strip()]
+    out: list[str] = []
+    for p in parts:
+        s = p.strip().strip('"').strip()
+        # Strip trailing MIME suffix (but keep the Windows drive colon).
+        s = re.sub(r":[A-Za-z0-9.+-]+/[A-Za-z0-9.+-]+$", "", s)
+        # Unescape Zotero/BibTeX Windows path encoding.
+        s = s.replace("\\:", ":").replace("\\\\", "\\")
+        if s:
+            out.append(s)
+    return out
 
 
 def _collapse_ws(s: str) -> str:
@@ -141,11 +188,20 @@ def _body_markdown(fields: dict[str, str]) -> str:
 
     lines: list[str] = []
 
-    f = _collapse_ws(fields.get("file", ""))
+    f_raw = fields.get("file", "") or ""
+    f = _collapse_ws(f_raw)
     if f:
-        file_url = _file_url_from_windows_path(f)
-        if file_url:
-            lines.append(f"[Open file]({file_url})")
+        files = _split_zotero_file_field(f)
+        if files:
+            lines.append("## Attachments")
+            for i, path in enumerate(files, start=1):
+                file_url = _file_url_from_windows_path(path)
+                if not file_url:
+                    continue
+                lines.append(f"- [Open attachment {i}]({file_url})")
+            lines.append("")
+
+        # Keep the raw Zotero field for debugging/search (verbatim).
         lines.append(f"`{f}`")
         lines.append("")
 
@@ -312,10 +368,30 @@ def _stable_import_id(entry: BibEntry) -> str:
     return h.hexdigest()
 
 
+def _source_hash(entry: BibEntry) -> str:
+    # Purpose: detect changes in the BibTeX record so reruns can UPDATE existing pages.
+    # Keep this stable: canonical JSON with sorted keys.
+    payload = {
+        "entry_type": entry.entry_type,
+        "citekey": entry.citekey,
+        "fields": {k: entry.fields.get(k, "") for k in sorted(entry.fields.keys())},
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8", errors="replace")
+    return hashlib.sha1(raw).hexdigest()
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="Import Zotero BibTeX .bib into Enkidu pages via /api/pages.")
     p.add_argument("bib_path", type=Path, help="Path to Zotero .bib file")
+    p.add_argument(
+        "--purge-existing",
+        action="store_true",
+        help='Delete ALL existing pages where kv_tags.source == "zotero" before importing (dangerous).',
+    )
     args = p.parse_args()
+
+    # Load repo `.env` so this script can be run without manually exporting vars every time.
+    load_repo_dotenv()
 
     base_url = _env_required("ENKIDU_BASE_URL").rstrip("/")
     admin_token = _env_required("ENKIDU_ADMIN_TOKEN")
@@ -331,34 +407,110 @@ def main() -> int:
     if allow_secrets:
         common_headers["x-enkidu-allow-secrets"] = "1"
 
-    # Build a set of existing citekeys to avoid duplicates.
-    existing: set[str] = set()
-    data = _http_json(
-        url=(
-            f"{base_url}/api/pages"
-            f"?limit=2000&kv_key={urllib.parse.quote('source')}&kv_value={urllib.parse.quote('zotero')}"
-        ),
-        method="GET",
-        headers=common_headers,
-    )
-    for page in (data or {}).get("pages", []) or []:
-        ck = (page.get("kv_tags") or {}).get("zotero_citekey")
-        if isinstance(ck, str) and ck.strip():
-            existing.add(ck.strip())
+    # Build a map of existing Zotero pages by citekey so reruns can update in-place.
+    # IMPORTANT: Supabase/PostgREST often caps responses at 1000 rows, regardless of requested limit,
+    # so we page using offset.
+    # Note: GET /api/pages returns newest first, so we keep the first page for any duplicate citekey.
+    existing_by_citekey: dict[str, dict[str, Any]] = {}
+    duplicate_citekeys: set[str] = set()
+
+    PAGE_SIZE = 1000
+    MAX_EXISTING = 5000
+    fetched = 0
+    offset = 0
+    seen_first_ids: set[str] = set()
+
+    while fetched < MAX_EXISTING:
+        data = _http_json(
+            url=(
+                f"{base_url}/api/pages"
+                f"?limit={PAGE_SIZE}&offset={offset}"
+                f"&kv_key={urllib.parse.quote('source')}&kv_value={urllib.parse.quote('zotero')}"
+            ),
+            method="GET",
+            headers=common_headers,
+        )
+        existing_pages = (data or {}).get("pages", []) or []
+        if not existing_pages:
+            break
+
+        # Detect "offset ignored" (common when hitting an older deployed API).
+        first_id = str(existing_pages[0].get("id") or "").strip()
+        if first_id and first_id in seen_first_ids:
+            print(
+                "ERROR: backend appears to ignore the offset parameter (received the same first page of results again).\n"
+                "You likely need to redeploy the updated Netlify Functions (or point ENKIDU_BASE_URL at your local netlify dev).\n"
+                "Refusing to continue to avoid creating duplicates / partial purges.",
+                file=sys.stderr,
+            )
+            return 2
+        if first_id:
+            seen_first_ids.add(first_id)
+
+        for page in existing_pages:
+            ck = (page.get("kv_tags") or {}).get("zotero_citekey")
+            if isinstance(ck, str) and ck.strip():
+                key = ck.strip()
+                if key in existing_by_citekey:
+                    duplicate_citekeys.add(key)
+                    continue
+                existing_by_citekey[key] = page
+
+        fetched += len(existing_pages)
+        offset += len(existing_pages)
+        if len(existing_pages) < PAGE_SIZE:
+            break
+
+    if fetched >= MAX_EXISTING:
+        print(
+            f"WARNING: stopped after fetching {MAX_EXISTING} existing Zotero pages. If you have more, reruns may create duplicates.",
+            file=sys.stderr,
+        )
+
+    if args.purge_existing and existing_by_citekey:
+        # Purpose: allow a clean reimport if you accidentally created duplicates or want to restart.
+        ids_to_delete = [str(p.get("id") or "").strip() for p in existing_by_citekey.values()]
+        ids_to_delete = [i for i in ids_to_delete if i]
+        print(f"Purging {len(ids_to_delete)} existing Zotero pages...")
+        deleted = 0
+        for pid in ids_to_delete:
+            _http_text(
+                url=f"{base_url}/api/page?id={urllib.parse.quote(pid)}",
+                method="DELETE",
+                headers=common_headers,
+            )
+            deleted += 1
+            if deleted % 50 == 0:
+                print(f"Deleted {deleted} pages...")
+        print(f"Purged {deleted} Zotero pages.")
+        existing_by_citekey = {}
+        duplicate_citekeys = set()
+
+    print(f"Found {len(existing_by_citekey)} existing Zotero pages (by zotero_citekey).")
 
     imported = 0
-    skipped = 0
+    updated = 0
+    unchanged = 0
+    skipped_duplicates = 0
+
+    if duplicate_citekeys:
+        # Warn loudly: duplicate citekeys mean prior imports created duplicates or citekeys changed.
+        print(
+            "WARNING: multiple existing pages share the same zotero_citekey (keeping newest page; older duplicates ignored):\n"
+            + "\n".join(sorted(duplicate_citekeys)),
+            file=sys.stderr,
+        )
 
     for entry in entries:
-        if entry.citekey in existing:
-            skipped += 1
-            continue
+        new_import_id = _stable_import_id(entry)
+        new_source_hash = _source_hash(entry)
 
         kv_tags: dict[str, Any] = {
             "source": "zotero",
             "zotero_citekey": entry.citekey,
             "zotero_type": entry.entry_type,
-            "zotero_import_id": _stable_import_id(entry),
+            "zotero_import_id": new_import_id,
+            "zotero_source_hash": new_source_hash,
         }
         # Store all BibTeX fields as kv_tags (as requested: author/year/journaltitle/etc).
         for k, v in entry.fields.items():
@@ -368,26 +520,59 @@ def main() -> int:
         title = _page_title(entry.fields)
         content_md = _body_markdown(entry.fields)
 
+        existing_page = existing_by_citekey.get(entry.citekey)
+        if not existing_page:
+            _http_json(
+                url=f"{base_url}/api/pages",
+                method="POST",
+                headers=common_headers,
+                body_obj={
+                    "title": title,
+                    "content_md": content_md,
+                    "tags": ["zotero"],
+                    "kv_tags": kv_tags,
+                    "thread_id": None,
+                    "next_page_id": None,
+                },
+            )
+            imported += 1
+            existing_by_citekey[entry.citekey] = {"kv_tags": kv_tags}
+            if imported % 25 == 0:
+                print(f"Imported {imported} pages...")
+            continue
+
+        # Update only if the Zotero source hash changed (or is missing).
+        old_kv = existing_page.get("kv_tags") or {}
+        old_hash = old_kv.get("zotero_source_hash")
+        if isinstance(old_hash, str) and old_hash.strip() == new_source_hash:
+            unchanged += 1
+            continue
+
+        # Merge kv_tags so we don't blow away unrelated keys the user may have added manually.
+        merged_kv = dict(old_kv)
+        merged_kv.update(kv_tags)
+
+        page_id = str(existing_page.get("id") or "").strip()
+        if not page_id:
+            skipped_duplicates += 1
+            continue
+
         _http_json(
-            url=f"{base_url}/api/pages",
-            method="POST",
+            url=f"{base_url}/api/page?id={urllib.parse.quote(page_id)}",
+            method="PUT",
             headers=common_headers,
             body_obj={
                 "title": title,
                 "content_md": content_md,
                 "tags": ["zotero"],
-                "kv_tags": kv_tags,
-                "thread_id": None,
-                "next_page_id": None,
+                "kv_tags": merged_kv,
             },
         )
+        updated += 1
+        if updated % 25 == 0:
+            print(f"Updated {updated} pages...")
 
-        imported += 1
-        existing.add(entry.citekey)
-        if imported % 25 == 0:
-            print(f"Imported {imported} pages...")
-
-    print(f"Done. Imported {imported} pages. Skipped {skipped} duplicates.")
+    print(f"Done. Imported {imported} pages. Updated {updated} pages. Unchanged {unchanged} pages.")
     return 0
 
 

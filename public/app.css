@@ -140,9 +140,15 @@
 }
 
 .enkidu-msg {
-  padding: 0.5rem;
+  padding: 0.25rem;
   border-radius: 0.5rem;
-  margin-bottom: 0.5rem;
+  margin-bottom: 0.2rem;
+  line-height: 1.25;
+}
+
+/* Purpose: tighten the default Bootstrap spacing used in message headers. */
+.enkidu-msg > .small {
+  margin-bottom: 0.1rem !important;
 }
 
 .enkidu-msg-user {
@@ -283,13 +289,33 @@
 
 .enkidu-json-details {
   /* Purpose: keep tool JSON readable without spamming the chat log. */
-  margin: 0.25rem 0 0.75rem 0;
+  margin: 0.1rem 0;
 }
 
 .enkidu-json-summary {
   /* Purpose: clear affordance that this is expandable. */
   cursor: pointer;
   user-select: none;
+  line-height: 1.2;
+}
+
+/* Purpose: reduce default Markdown element margins inside chat bubbles (prevents huge vertical whitespace). */
+.enkidu-msg p {
+  margin: 0.1rem 0;
+}
+.enkidu-msg p:first-child {
+  margin-top: 0;
+}
+.enkidu-msg p:last-child {
+  margin-bottom: 0;
+}
+.enkidu-msg pre {
+  margin: 0.1rem 0;
+}
+.enkidu-msg ul,
+.enkidu-msg ol {
+  margin: 0.1rem 0;
+  padding-left: 1.25rem;
 }
 
 a.enkidu-page-id {

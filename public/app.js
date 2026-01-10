@@ -143,6 +143,7 @@ function setStatus(text, kind = "secondary") {
 let kvTagsBuilderUpdating = false;
 let kvTagsBuilderDebounce = null;
 let kvTagKeyCounts = null; // computed from recent pages: key -> count (for builder key suggestions)
+let kvSectionForceNext = false; // Purpose: after loading a page, auto-collapse KV section when it has >3 keys.
 
 function kvTagsRefreshKeyDatalist() {
   // Purpose: offer frequent KV keys first, but allow matching any known key while typing.
@@ -323,6 +324,9 @@ function kvTagsRefreshFromTextarea() {
   const ta = $("pageKvTags");
   if (!ta) return;
 
+  const kvDetails = $("kvSection");
+  const kvCountBadge = $("kvSectionCount");
+
   let obj = {};
   const raw = String(ta.value || "").trim();
   if (raw) {
@@ -331,6 +335,9 @@ function kvTagsRefreshFromTextarea() {
       obj = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
       kvTagsSetMsg("");
     } catch {
+      if (kvCountBadge) kvCountBadge.textContent = "!";
+      if (kvDetails) kvDetails.open = true; // keep visible so the user can fix JSON
+      kvSectionForceNext = false;
       kvTagsSetMsg("Invalid JSON in KV tags textbox (builder paused until fixed or overwritten by editing rows).");
       return; // don't destroy current rows while user is mid-edit in the textarea
     }
@@ -338,6 +345,18 @@ function kvTagsRefreshFromTextarea() {
     kvTagsSetMsg("");
   }
 
+  const keyCount = Object.keys(obj || {}).length;
+  if (kvCountBadge) kvCountBadge.textContent = String(keyCount);
+  if (kvDetails) {
+    if (kvSectionForceNext) {
+      // Purpose: default collapsed for "many" keys when the page is loaded/selected.
+      kvDetails.open = keyCount <= 3;
+    } else if (keyCount <= 3) {
+      // Purpose: if KV tags become small again, auto-open; don't auto-close while user is editing.
+      kvDetails.open = true;
+    }
+  }
+  kvSectionForceNext = false;
   kvTagsRenderRowsFromObject(obj);
 }
 
@@ -741,6 +760,21 @@ function preprocessWikilinks(md) {
   });
 }
 
+function unwrapEnkiduAgentEnvelope(rawText) {
+  // Purpose: if the backend stored the agent JSON envelope, show the human text instead of literal JSON.
+  // Envelope shape: {"enkidu_agent":{"type":"final"|"plan"|...,"text":"...markdown..."}}
+  const s = String(rawText || "").trim();
+  if (!s.startsWith("{") || !s.endsWith("}")) return null;
+  try {
+    const parsed = JSON.parse(s);
+    const text = parsed?.enkidu_agent?.text;
+    if (typeof text === "string") return text;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 function extractWikilinkTitles(text) {
   // Purpose: parse [[Title]] and [[Title|Label]] from raw text.
   const s = String(text || "");
@@ -1122,7 +1156,7 @@ async function openPageById(pageId) {
   // Purpose: centralise "open this page in the editor" for wikilinks and list clicks.
   setStatus("Loading page...", "secondary");
   const one = await apiFetch(`/api/page?id=${encodeURIComponent(pageId)}`);
-  setSelectedPage(one.page);
+  setSelectedPage(one.page, { newMode: false });
   setStatus("Page loaded.", "success");
 }
 
@@ -1162,6 +1196,7 @@ function updatePayloadCount() {
 // -------------------------
 
 let selectedPageId = null;
+let isNewPageMode = false; // Purpose: distinguish "New page" mode from "nothing selected" (startup/after delete).
 let isEditingMarkdown = false; // merged markdown+preview: preview by default when non-empty
 let autosaveDebounce = null;
 let autosaveInFlight = false; // Purpose: avoid overlapping autosave requests (can create multiple pages).
@@ -1169,6 +1204,21 @@ let autosaveRequestedDuringFlight = false; // Purpose: if user types while savin
 let suppressAutosave = false; // Purpose: avoid autosave when we programmatically fill fields.
 let lastSavedPayloadJson = null; // Purpose: avoid saving when nothing changed.
 let previewClickTimer = null; // Purpose: single-click opens modal; double-click edits (cancel timer).
+
+function syncRecallEditorVisibility() {
+  // Purpose: avoid showing editor fields when there's no selected page and we're not creating a new one.
+  const fields = $("recallEditorFields");
+  const empty = $("recallEditorEmpty");
+  if (!fields || !empty) return;
+
+  const showEditor = !!selectedPageId || isNewPageMode;
+  fields.classList.toggle("d-none", !showEditor);
+  empty.classList.toggle("d-none", showEditor);
+
+  // Purpose: delete only makes sense when a page is selected (payload deletes are via checkboxes).
+  const del = $("deletePage");
+  if (del) del.disabled = !selectedPageId;
+}
 
 function openPreviewModal() {
   // Purpose: show the rendered preview in a large modal (workaround for tricky scroll sizing).
@@ -1302,8 +1352,10 @@ function syncMarkdownWidget() {
 
 }
 
-function setSelectedPage(page) {
+function setSelectedPage(page, { newMode = false } = {}) {
   suppressAutosave = true;
+  // Purpose: explicitly track whether we're creating a new page or viewing an existing one.
+  isNewPageMode = !!newMode;
   selectedPageId = page?.id || null;
   $("pageId").textContent = selectedPageId || "(none)";
   $("pageTitle").value = page?.title || "";
@@ -1313,6 +1365,7 @@ function setSelectedPage(page) {
   isEditingMarkdown = false;
   syncMarkdownWidget();
   refreshClearButtons();
+  kvSectionForceNext = true;
   kvTagsRefreshFromTextarea();
   try {
     lastSavedPayloadJson = JSON.stringify(buildRecallPayloadFromUi());
@@ -1321,6 +1374,7 @@ function setSelectedPage(page) {
   }
   suppressAutosave = false;
   updateRecallCurrentHighlight();
+  syncRecallEditorVisibility();
 }
 
 function updateRecallCurrentHighlight() {
@@ -1338,6 +1392,22 @@ function updateRecallCurrentHighlight() {
 function renderRecallResults(pages) {
   const root = $("recallResults");
   root.innerHTML = "";
+
+  function displayTitleFromPage(p) {
+    // Purpose: label pages consistently even when title is blank (use first non-empty content line).
+    const t = String(p?.title || "").trim();
+    if (t) return t;
+    const md = String(p?.content_md || "");
+    for (const rawLine of md.split(/\r?\n/)) {
+      let line = String(rawLine || "").trim();
+      if (!line) continue;
+      // Normalize common headings like "# Foo" -> "Foo" (keeps UI tidy without changing stored content).
+      line = line.replace(/^#{1,6}\s+/, "");
+      if (!line) continue;
+      return line;
+    }
+    return "";
+  }
 
   // Purpose: compute per-list normalization so we can show a right-border intensity scale.
   const embDistances = (pages || [])
@@ -1401,7 +1471,7 @@ function renderRecallResults(pages) {
     btn.className = `btn btn-sm ${isCurrent ? "btn-primary text-white" : "btn-light"} w-100 text-start`;
     btn.dataset.openPageId = p.id;
 
-    const title = p.title || (p.content_md || "").slice(0, 80) || "(untitled)";
+    const title = displayTitleFromPage(p) || "(untitled)";
     const when = p.created_at ? new Date(p.created_at).toLocaleString() : "";
     btn.textContent = `${title} — ${when}`;
     const strength = relatedStrength01(p);
@@ -1506,11 +1576,11 @@ async function recallSearch() {
 
   // If there is no chat text yet, just show recent assistant chat pages.
   if (!chatText) {
-    const pages = await ensureRecentPagesCache();
     if (matchers.time) {
       // If Time is enabled and there is no draft/search, show the most recent pages overall.
-      // (Cache is already ordered by created_at desc via /api/pages.)
-      const recent = (pages || []).slice(0, 50).map((p) => ({
+      // IMPORTANT: fetch non-light pages so we have content_md available for the title fallback UI.
+      const data = await apiFetch(`/api/pages?limit=50`);
+      const recent = (data.pages || []).map((p) => ({
         ...p,
         _enkidu_rel: { kind: "heuristic", score: p?.created_at ? new Date(p.created_at).getTime() : 0, textScore: 0 },
       }));
@@ -1521,7 +1591,10 @@ async function recallSearch() {
     }
 
     // Otherwise, keep the older behavior: show recent chat pages.
-    const candidates = pages.filter(
+    // IMPORTANT: fetch non-light pages so we have content_md available for the title fallback UI.
+    // Oversample a bit so we can filter out internal tool bubbles.
+    const data = await apiFetch(`/api/pages?limit=200&tag=${encodeURIComponent("*chat")}`);
+    const candidates = (data.pages || []).filter(
       (p) =>
         (p?.kv_tags?.role === "assistant" || p?.kv_tags?.role === "user") && (p?.tags || []).includes("*chat")
     );
@@ -1723,7 +1796,7 @@ async function deletePage() {
   }
 
   updatePayloadCount();
-  setSelectedPage(null);
+  setSelectedPage(null, { newMode: false });
   invalidatePagesCache({ reason: "deletePage" });
   setStatus("Deleted.", "success");
   await recallSearch();
@@ -1748,7 +1821,9 @@ function makeChatMsgDiv(p, { pending = false } = {}) {
   // Purpose: assistant replies are Markdown; render as HTML for readability.
   // NOTE: this renders HTML produced by `marked` (treat assistant content as untrusted).
   if (role === "assistant" && window.marked) {
-    body.innerHTML = window.marked.parse(preprocessWikilinks(p.content_md || ""));
+    const unwrapped = unwrapEnkiduAgentEnvelope(p.content_md || "");
+    const md = unwrapped != null ? unwrapped : (p.content_md || "");
+    body.innerHTML = window.marked.parse(preprocessWikilinks(md));
     collapseJsonCodeBlocks(body);
     linkifyPageIdsInText(body);
   } else {
@@ -1866,6 +1941,8 @@ function init() {
   if ($("apiBaseUrl")) $("apiBaseUrl").value = getApiBaseUrl();
   refreshClearButtons();
   updatePayloadCount();
+  // Default UI state: nothing selected until the user opens a page or clicks New page.
+  setSelectedPage(null, { newMode: false });
   if ($("allowSecrets")) $("allowSecrets").checked = getAllowSecrets();
   if ($("useWebSearch")) $("useWebSearch").checked = getUseWebSearch();
   if ($("liveRelated")) $("liveRelated").checked = getLiveRelated();
@@ -1950,7 +2027,7 @@ function init() {
       recallSearch().catch(() => {});
     }
   });
-  $("newPage").onclick = () => setSelectedPage(null);
+  $("newPage").onclick = () => setSelectedPage(null, { newMode: true });
   $("pageTagPreset")?.addEventListener("change", () => {
     // Purpose: add a predefined tag set to the Tags box (deduped).
     const sel = $("pageTagPreset");
@@ -2210,7 +2287,7 @@ function init() {
     const title = String(clip.title || "").slice(0, 200) || url || "(clip)";
     const text = String(clip.text || "").slice(0, 8000);
 
-    setSelectedPage(null);
+    setSelectedPage(null, { newMode: true });
     $("pageTitle").value = title;
     $("pageTags").value = Array.from(new Set([...parseTags($("pageTags").value), "clip", "web"])).join(", ");
     $("pageKvTags").value = JSON.stringify({ source_url: url }, null, 2);
@@ -2244,7 +2321,16 @@ function init() {
   if (getToken()) {
     recallSearch().catch(() => {});
     loadModels().catch(() => {});
-    loadThreads().catch(() => {});
+    (async () => {
+      await loadThreads();
+      // Purpose: on reload, default to most recent chat thread (first option after "(new thread)").
+      const sel = $("threadSelect");
+      const mostRecent = sel?.options?.[1]?.value || "";
+      if (mostRecent) {
+        sel.value = mostRecent;
+        await reloadThread();
+      }
+    })().catch(() => {});
     ensureRecentPagesCache().catch(() => {});
   }
 

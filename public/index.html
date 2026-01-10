@@ -118,7 +118,7 @@
                     <i class="bi bi-fonts"></i>
                   </label>
 
-                  <input type="checkbox" class="btn-check" id="matchTitle" autocomplete="off" />
+                  <input type="checkbox" class="btn-check" id="matchTitle" autocomplete="off" checked />
                   <label class="btn btn-outline-secondary" for="matchTitle" title="Title: word overlap with page titles">
                     <i class="bi bi-card-text"></i>
                   </label>
@@ -151,81 +151,99 @@
                 </div>
                 <div class="col-12 col-md-7">
                   <div class="mb-2 d-flex gap-2">
-                    <button id="newPage" class="btn btn-sm btn-outline-secondary" type="button" title="New page" aria-label="New page">
-                      <i class="bi bi-file-earmark-plus"></i>
-                    </button>
                     <button id="deletePage" class="btn btn-sm btn-outline-danger" type="button" title="Delete" aria-label="Delete">
                       <i class="bi bi-trash"></i>
                     </button>
                   </div>
 
-                  <div class="mb-2">
-                    <label class="form-label small mb-1" for="pageTitle">Title</label>
-                    <input id="pageTitle" class="form-control form-control-sm" />
-                  </div>
-
-                  <div class="mb-2">
-                    <label class="form-label small mb-1" for="pageTags">Tags (comma-separated)</label>
-                    <div class="input-group input-group-sm">
-                      <input id="pageTags" class="form-control" placeholder="e.g. style, preference" />
-                      <select id="pageTagPreset" class="form-select w-auto" style="max-width: 12rem" title="Add preset tags">
-                        <option value="">(add preset tags…)</option>
-                        <option value="*system,*preference">System base page</option>
-                        <option value="*style,*preference">Style base page</option>
-                        <option value="*bio,*preference">Bio base page</option>
-                        <option value="*strategy,*preference">Strategy base page</option>
-                        <option value="*dream-prompt,*preference">Dream base page</option>
-                        <option value="*split-prompt,*preference">Split base page</option>
-                      </select>
-                    </div>
-                  </div>
-
-                  <div class="mb-2">
-                    <label class="form-label small mb-1" for="pageKvTags">KV tags (JSON)</label>
-                    <!-- Purpose: KV tags builder (easy add/edit/delete). Textarea remains the source of truth (backend unchanged). -->
-                    <div id="kvTagsBuilder" class="border rounded p-2 bg-white mb-1">
-                      <div class="d-flex align-items-center gap-2 mb-1">
-                        <div class="small text-secondary">Builder</div>
-                        <button id="kvTagsAddRow" class="btn btn-sm btn-outline-secondary ms-auto" type="button">Add</button>
+                  <!-- Purpose: when nothing is selected, keep the panel minimal (avoid editing "phantom" pages). -->
+                  <div id="recallEditorEmpty" class="alert alert-secondary py-2">
+                    <!-- Purpose: make the "new page" action big + obvious when nothing is selected. -->
+                    <button id="newPage" class="btn btn-primary w-100 text-start" type="button" title="New page" aria-label="New page">
+                      <div class="fw-semibold">
+                        <i class="bi bi-file-earmark-plus me-2"></i>New page
                       </div>
-                      <div class="table-responsive">
-                        <table class="table table-sm mb-1 align-middle">
-                          <thead>
-                            <tr class="small text-secondary">
-                              <th style="width: 35%">Key</th>
-                              <th>Value</th>
-                              <th style="width: 1%"></th>
-                            </tr>
-                          </thead>
-                          <tbody id="kvTagsRows"></tbody>
-                        </table>
-                      </div>
-                      <div id="kvTagsBuilderMsg" class="small text-danger"></div>
+                      <div class="small opacity-75">Select a page on the left, or click to create one.</div>
+                    </button>
+                  </div>
+
+                  <!-- Purpose: editor fields are only shown when a page is selected OR when in "New page" mode. -->
+                  <div id="recallEditorFields" class="d-none">
+                    <div class="mb-2">
+                      <label class="form-label small mb-1" for="pageTitle">Title</label>
+                      <input id="pageTitle" class="form-control form-control-sm" />
                     </div>
-                    <!-- Purpose: KV builder suggestions (keys + per-key values). -->
-                    <datalist id="kvTagsKeySuggestions"></datalist>
-                    <datalist id="kvTagsValueSuggestions"></datalist>
-                    <textarea
-                      id="pageKvTags"
-                      class="form-control form-control-sm font-monospace"
-                      rows="2"
-                      placeholder='e.g. {"role":"assistant","kind":"note"}'
-                    ></textarea>
-                    <div class="form-text small">Tip: values can be plain text (saved as strings) or JSON literals like <span class="font-monospace">true</span>, <span class="font-monospace">123</span>, <span class="font-monospace">{"x":1}</span>.</div>
-                  </div>
 
-                  <div class="mb-2 enkidu-md-wrap">
-                    <label class="form-label small mb-1" for="pageContent">Markdown</label>
-                    <textarea id="pageContent" class="form-control" rows="10"></textarea>
-                  </div>
+                    <div class="mb-2">
+                      <label class="form-label small mb-1" for="pageTags">Tags (comma-separated)</label>
+                      <div class="input-group input-group-sm">
+                        <input id="pageTags" class="form-control" placeholder="e.g. style, preference" />
+                        <select id="pageTagPreset" class="form-select w-auto" style="max-width: 12rem" title="Add preset tags">
+                          <option value="">(add preset tags…)</option>
+                          <option value="*system,*preference">System base page</option>
+                          <option value="*style,*preference">Style base page</option>
+                          <option value="*bio,*preference">Bio base page</option>
+                          <option value="*strategy,*preference">Strategy base page</option>
+                          <option value="*dream-prompt,*preference">Dream base page</option>
+                          <option value="*split-prompt,*preference">Split base page</option>
+                        </select>
+                      </div>
+                    </div>
 
-                  <div class="mb-2 enkidu-preview-wrap">
-                    <label class="form-label small mb-1">Rendered (double-click to edit)</label>
-                    <div id="pagePreview" class="border rounded p-2 bg-white enkidu-preview"></div>
-                  </div>
+                    <!-- Purpose: keep the UI tidy; collapse KV tags by default when there are "many" keys. -->
+                    <details id="kvSection" class="mb-2" open>
+                      <summary class="d-flex align-items-center gap-2 small">
+                        <span class="fw-semibold">KV tags (JSON)</span>
+                        <span id="kvSectionCount" class="badge text-bg-secondary">0</span>
+                        <span class="ms-auto text-secondary">expand/collapse</span>
+                      </summary>
+                      <div class="mt-2">
+                        <!-- Purpose: KV tags builder (easy add/edit/delete). Textarea remains the source of truth (backend unchanged). -->
+                        <div id="kvTagsBuilder" class="border rounded p-2 bg-white mb-1">
+                          <div class="d-flex align-items-center gap-2 mb-1">
+                            <div class="small text-secondary">Builder</div>
+                            <button id="kvTagsAddRow" class="btn btn-sm btn-outline-secondary ms-auto" type="button">Add</button>
+                          </div>
+                          <div class="table-responsive">
+                            <table class="table table-sm mb-1 align-middle">
+                              <thead>
+                                <tr class="small text-secondary">
+                                  <th style="width: 35%">Key</th>
+                                  <th>Value</th>
+                                  <th style="width: 1%"></th>
+                                </tr>
+                              </thead>
+                              <tbody id="kvTagsRows"></tbody>
+                            </table>
+                          </div>
+                          <div id="kvTagsBuilderMsg" class="small text-danger"></div>
+                        </div>
+                        <!-- Purpose: KV builder suggestions (keys + per-key values). -->
+                        <datalist id="kvTagsKeySuggestions"></datalist>
+                        <datalist id="kvTagsValueSuggestions"></datalist>
+                        <textarea
+                          id="pageKvTags"
+                          class="form-control form-control-sm font-monospace"
+                          rows="2"
+                          placeholder='e.g. {"role":"assistant","kind":"note"}'
+                        ></textarea>
+                        <div class="form-text small">Tip: values can be plain text (saved as strings) or JSON literals like <span class="font-monospace">true</span>, <span class="font-monospace">123</span>, <span class="font-monospace">{"x":1}</span>.</div>
+                      </div>
+                    </details>
 
-                  <div class="text-secondary small">
-                    Selected page id: <span id="pageId">(none)</span>
+                    <div class="mb-2 enkidu-md-wrap">
+                      <label class="form-label small mb-1" for="pageContent">Markdown</label>
+                      <textarea id="pageContent" class="form-control" rows="10"></textarea>
+                    </div>
+
+                    <div class="mb-2 enkidu-preview-wrap">
+                      <label class="form-label small mb-1">Rendered (double-click to edit)</label>
+                      <div id="pagePreview" class="border rounded p-2 bg-white enkidu-preview"></div>
+                    </div>
+
+                    <div class="text-secondary small">
+                      Selected page id: <span id="pageId">(none)</span>
+                    </div>
                   </div>
                 </div>
               </div>
