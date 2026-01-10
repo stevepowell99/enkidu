@@ -139,13 +139,15 @@ Enkidu
   - When recall search is empty, recall list auto-populates with “related pages” based on chatbox text (client-side token overlap), with presets: Mixed / Time only / Tags only / Text only
   - Quick-create buttons for base pages: System / Style / Bio / Strategy / Dream prompt / Split prompt
   - Keyboard shortcuts (only when focus is NOT in a text box):
-    - `Del`: delete current page and any checked Related/Payload pages
+    - `Del` (or `y`): delete current page and any checked Related/Payload pages
     - `x`: toggle payload checkbox for the current page (in the visible Related list)
     - `j`: focus/open next page in the visible Related list
     - `k`: focus/open previous page in the visible Related list
     - `/`: focus chat input
     - `t`: focus tag filter
-    - `r`: toggle “Live related”
+    - `n`: new thread
+    - `w`: toggle web search on/off
+    - (removed) `r`: Live related toggle was removed (use the Chat “Search” button to refresh Recall/Related)
 
 ## Open questions (decisions we have not made yet)
 
@@ -176,24 +178,25 @@ Put these in `.env` (or real env vars). See `env.example`.
 - `SUPABASE_URL` (required)
 - `SUPABASE_SERVICE_ROLE_KEY` (required; server-side only; use Supabase \"secret\" key)
 - `SUPABASE_DB_URL` (optional; only needed for `sql_select`; direct Postgres connection string)
+  - IMPORTANT (Windows / many home networks): the default Supabase DB host `db.<ref>.supabase.co` may be **IPv6-only**. If your network can’t reach IPv6, `sql_select` will fail.
+  - Fix (single variant that works locally):
+    - Either **enable IPv6 connectivity** on your machine/network, OR
+    - Use a Supabase connection string that has **IPv4** (Supabase may require the **IPv4 add-on** for this).
+  - Note: Supabase “pooler / PgBouncer” endpoints are not guaranteed IPv4 on all plans/configs (Supabase UI may explicitly say “Dedicated Pooler is not IPv4 compatible”).
+  - Why the rest of Enkidu still works on IPv4-only networks:
+    - Most API calls use **Supabase PostgREST + RPC over HTTPS** (`SUPABASE_URL/rest/v1/...`), which is reachable even if direct Postgres is not.
+    - `sql_select` is different: it opens a **direct TCP connection** to Postgres on port **5432**, so it depends on whether your machine/network can reach the DB host (IPv6 vs IPv4).
 - `GEMINI_API_KEY` (required; server-side only)
 - `GEMINI_MODEL` (optional; default `gemini-3-flash-preview`)
 - `GEMINI_EMBED_MODEL` (optional; default `text-embedding-004`)
 
 
-## Hosting Locally with Netlify CLI
+## Local development (single mode: UI + API same-origin)
 
-This repo is a static site (`public/`) + Netlify Functions (`netlify/functions/`). The simplest way to run both locally is via the Netlify CLI.
-
-### Requirements
-- Node.js 18+
-- Netlify CLI
+The simplest reliable local mode is **one Node server** that runs the API (Express) and serves the UI (`public/`) from the same origin.
 
 ### Setup (PowerShell)
 ```powershell
-# Install Netlify CLI (one-time)
-npm install -g netlify-cli
-
 # Create local env file (do NOT commit real values)
 Copy-Item env.example .env
 
@@ -204,10 +207,21 @@ notepad .env
 
 ### Run
 ```powershell
-netlify dev
+npm start
 ```
 
-Then open `http://localhost:8888` (Netlify’s default) and paste the same admin token into the UI.
+Then open `http://localhost:8080` and paste the same admin token into the UI.
+
+### Run on a different port
+```powershell
+$env:PORT=9999; npm start
+```
+
+Then open `http://localhost:9999`.
+
+### Optional: Netlify CLI mode (not recommended)
+
+You *can* run `netlify dev`, but `lambda-local` has a hard ~30s timeout per function and you will hit it with slow Gemini calls. Prefer `npm start` for local work.
 
 ## Definitive request routing map (UI → API)
 
@@ -215,7 +229,8 @@ The UI (in `public/app.js`) always calls API paths like `/api/chat`, `/api/pages
 
 - **API base blank** (default): calls go to the **same origin** as the UI (relative `/api/...`).
   - If the UI is served by Netlify (production) this hits Netlify redirects → Netlify Functions.
-  - If the UI is served by `netlify dev` (local) this hits lambda-local → Netlify Functions.
+  - If the UI is served locally by `npm start` (recommended) this hits Express → the same handlers under `netlify/functions/`.
+  - If the UI is served by `netlify dev` (local, optional) this hits lambda-local → Netlify Functions.
 - **API base set** (e.g. your Cloud Run URL): calls go to that **API origin** (cross-origin), e.g. `https://<service>-<hash>-<region>.a.run.app/api/...`.
 
 Concretely:

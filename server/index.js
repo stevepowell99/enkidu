@@ -1,8 +1,53 @@
 // Cloud Run API server (Express).
 // Purpose: run the existing Netlify Functions API without Netlify/lambda-local 30s limits.
-// This is API-only (the UI can stay on Netlify or any static host).
+// Also supports a SINGLE local dev mode where UI + API are same-origin (serves `public/`).
 
 const express = require("express");
+const fs = require("fs");
+const path = require("path");
+
+// -------------------------
+// .env loader (simple, local-dev friendly)
+// -------------------------
+// Purpose: keep local dev simple (no extra tools) by reading a local `.env` file if present.
+// Notes:
+// - Only sets keys that are not already in process.env
+// - Supports basic KEY=VALUE lines, ignores blank lines and comments (# ...)
+function loadDotEnvIfPresent() {
+  try {
+    const envPath = path.join(process.cwd(), ".env");
+    if (!fs.existsSync(envPath)) return;
+    const raw = fs.readFileSync(envPath, "utf8");
+    for (const line0 of raw.split(/\r?\n/)) {
+      const line = String(line0 || "").trim();
+      if (!line || line.startsWith("#")) continue;
+      const eq = line.indexOf("=");
+      if (eq <= 0) continue;
+      const key = line.slice(0, eq).trim();
+      if (!key || Object.prototype.hasOwnProperty.call(process.env, key)) continue;
+      let val = line.slice(eq + 1).trim();
+      // Strip surrounding quotes if present.
+      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+        val = val.slice(1, -1);
+      }
+      process.env[key] = val;
+    }
+  } catch {
+    // Keep startup robust: if .env is malformed, don't crash the server.
+  }
+}
+loadDotEnvIfPresent();
+
+// -------------------------
+// Debug logging (opt-in)
+// -------------------------
+// Purpose: make it easy to debug local issues without spamming normal runs.
+const DEBUG_HTTP = String(process.env.ENKIDU_DEBUG_HTTP || "").trim() === "1";
+function safeHeaderValue(v, { max = 200 } = {}) {
+  const s = String(v || "");
+  if (s.length <= max) return s;
+  return s.slice(0, max) + `...(truncated ${s.length})`;
+}
 
 // -------------------------
 // Netlify function adapter
@@ -62,6 +107,28 @@ async function runNetlifyHandler(handler, req, res) {
 // -------------------------
 
 const app = express();
+
+// Request log (opt-in)
+app.use((req, res, next) => {
+  if (!DEBUG_HTTP) return next();
+  const started = Date.now();
+  const rid = Math.random().toString(16).slice(2, 10);
+  res.setHeader("x-enkidu-request-id", rid);
+  // eslint-disable-next-line no-console
+  console.error("[enkidu] http_in", {
+    rid,
+    method: req.method,
+    path: req.path,
+    origin: safeHeaderValue(req.headers.origin),
+    referer: safeHeaderValue(req.headers.referer),
+    ua: safeHeaderValue(req.headers["user-agent"]),
+  });
+  res.on("finish", () => {
+    // eslint-disable-next-line no-console
+    console.error("[enkidu] http_out", { rid, status: res.statusCode, ms: Date.now() - started });
+  });
+  next();
+});
 
 // Body: forward raw JSON text to match Netlify behavior.
 app.use(express.text({ type: "*/*", limit: "5mb" }));
@@ -124,6 +191,7 @@ const models = require("../netlify/functions/models").handler;
 const threads = require("../netlify/functions/threads").handler;
 const dream = require("../netlify/functions/dream").handler;
 const backfillEmbeddings = require("../netlify/functions/backfill-embeddings").handler;
+const embeddingsStatus = require("../netlify/functions/embeddings-status").handler;
 
 app.all("/api/chat", (req, res) => runNetlifyHandler(chat, req, res));
 app.all("/api/pages", (req, res) => runNetlifyHandler(pages, req, res));
@@ -133,9 +201,27 @@ app.all("/api/models", (req, res) => runNetlifyHandler(models, req, res));
 app.all("/api/threads", (req, res) => runNetlifyHandler(threads, req, res));
 app.all("/api/dream", (req, res) => runNetlifyHandler(dream, req, res));
 app.all("/api/backfill-embeddings", (req, res) => runNetlifyHandler(backfillEmbeddings, req, res));
+app.all("/api/embeddings-status", (req, res) => runNetlifyHandler(embeddingsStatus, req, res));
 
-// Default 404
-app.use((_req, res) => res.status(404).type("text/plain").send("Not Found"));
+// -------------------------
+// Local dev: serve the UI (same-origin, no CORS)
+// -------------------------
+// Purpose: single local mode that "just works" for everything:
+// - UI: GET / (and static assets) from `public/`
+// - API: /api/* routed above
+const publicDir = path.join(process.cwd(), "public");
+if (fs.existsSync(publicDir)) {
+  app.use(express.static(publicDir));
+  // Fallback to the SPA entry for non-API routes.
+  app.get("*", (req, res) => {
+    if (String(req.path || "").startsWith("/api/")) return res.status(404).type("text/plain").send("Not Found");
+    if (req.path === "/healthz") return res.status(404).type("text/plain").send("Not Found");
+    return res.sendFile(path.join(publicDir, "index.html"));
+  });
+} else {
+  // Default 404 (API-only mode)
+  app.use((_req, res) => res.status(404).type("text/plain").send("Not Found"));
+}
 
 const port = Number(process.env.PORT || 8080);
 app.listen(port, () => {

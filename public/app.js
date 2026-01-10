@@ -4,7 +4,6 @@
 const LS_TOKEN_KEY = "enkidu_admin_token";
 const LS_ALLOW_SECRETS_KEY = "enkidu_allow_secrets";
 const LS_USE_WEB_SEARCH_KEY = "enkidu_use_web_search";
-const LS_LIVE_RELATED_KEY = "enkidu_live_related";
 const LS_PAGES_CACHE_KEY = "enkidu_pages_cache_v1";
 const LS_PAGES_CACHE_TS_KEY = "enkidu_pages_cache_ts_v1";
 const LS_API_BASE_KEY = "enkidu_api_base_url";
@@ -22,6 +21,12 @@ function dbg(...args) {
 
 function $(id) {
   return document.getElementById(id);
+}
+
+function isLocalhostUi() {
+  // Purpose: treat local dev as "single box" (UI + API same-origin) to avoid CORS footguns.
+  const h = String(window.location.hostname || "").toLowerCase();
+  return h === "localhost" || h === "127.0.0.1" || h === "::1";
 }
 
 // NOTE: `openPageById()` is defined later (single canonical definition). Keep only one copy.
@@ -419,6 +424,9 @@ function setToken(token) {
 
 function getApiBaseUrl() {
   // Purpose: allow hosting API separately (e.g. Cloud Run) while keeping UI static (e.g. Netlify).
+  // IMPORTANT: in local dev, always use same-origin (/api/* via netlify dev) so everything works
+  // without requiring Cloud Run CORS setup or remembering stale saved API base URLs.
+  if (isLocalhostUi()) return "";
   return (localStorage.getItem(LS_API_BASE_KEY) || "").trim().replace(/\/+$/, "");
 }
 
@@ -443,15 +451,6 @@ function getUseWebSearch() {
 
 function setUseWebSearch(on) {
   sessionStorage.setItem(LS_USE_WEB_SEARCH_KEY, on ? "1" : "0");
-}
-
-function getLiveRelated() {
-  // Purpose: default OFF on each new browser session (do not persist across sessions).
-  return sessionStorage.getItem(LS_LIVE_RELATED_KEY) === "1";
-}
-
-function setLiveRelated(on) {
-  sessionStorage.setItem(LS_LIVE_RELATED_KEY, on ? "1" : "0");
 }
 
 function readClipParams() {
@@ -2052,14 +2051,19 @@ function init() {
   initClearButtons();
   initKvTagsBuilder();
   $("adminToken").value = getToken();
-  if ($("apiBaseUrl")) $("apiBaseUrl").value = getApiBaseUrl();
+  if ($("apiBaseUrl")) {
+    $("apiBaseUrl").value = getApiBaseUrl();
+    if (isLocalhostUi()) {
+      // Local mode: show blank (same-origin). Keep input enabled so you can copy/paste, but it won't be used.
+      $("apiBaseUrl").placeholder = "(local dev uses same origin)";
+    }
+  }
   refreshClearButtons();
   updatePayloadCount();
   // Default UI state: nothing selected until the user opens a page or clicks New page.
   setSelectedPage(null, { newMode: false });
   if ($("allowSecrets")) $("allowSecrets").checked = getAllowSecrets();
   if ($("useWebSearch")) $("useWebSearch").checked = getUseWebSearch();
-  if ($("liveRelated")) $("liveRelated").checked = getLiveRelated();
   dbg("init", {
     allowSecrets: getAllowSecrets(),
     useWebSearch: getUseWebSearch(),
@@ -2086,13 +2090,6 @@ function init() {
   });
   $("useWebSearch")?.addEventListener("change", () => {
     setUseWebSearch(!!$("useWebSearch").checked);
-  });
-  $("liveRelated")?.addEventListener("change", () => {
-    setLiveRelated(!!$("liveRelated").checked);
-    // If turning on, refresh immediately (then typing will keep it updated).
-    if ($("liveRelated").checked && !isRecallSearchActive()) {
-      recallSearch().catch(() => {});
-    }
   });
   $("toggleRelatedAll")?.addEventListener("click", () => {
     const ids = getVisibleRecallIds();
@@ -2190,27 +2187,26 @@ function init() {
   });
 
   $("sendChat").onclick = () => sendChat().catch((e) => setStatus(e.message, "danger"));
+  $("searchLocal").onclick = () => recallSearch().catch((e) => setStatus(e.message, "danger"));
   $("chatInput").addEventListener("keydown", (e) => {
     handleWikilinkKeydown(e);
     if (e.defaultPrevented) return; // wikilink picker consumed the key (e.g. Enter to select)
     // Enter submits; Shift+Enter inserts newline (since this is a textarea).
+    if (e.key === "Enter" && e.ctrlKey) {
+      e.preventDefault();
+      recallSearch().catch((err) => setStatus(err.message, "danger"));
+      return;
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       sendChat().catch((err) => setStatus(err.message, "danger"));
     }
   });
   $("chatInput").addEventListener("input", () => {
-    // Keep the recall list synced to chat input (and apply tag/KV filters additively when present).
     dbg("chatInput:input", { len: ($("chatInput")?.value || "").length, searchActive: isRecallSearchActive() });
 
     // Wikilink picker in chat box.
     openOrUpdateWikilinkPicker($("chatInput")).catch(() => {});
-
-    if (!getLiveRelated()) return;
-    if (relatedDebounce) clearTimeout(relatedDebounce);
-    relatedDebounce = setTimeout(() => {
-      recallSearch().catch(() => {});
-    }, 800);
   });
 
   // Click wikilinks in previews/chat to open pages.
@@ -2351,10 +2347,17 @@ function init() {
       cb.dispatchEvent(new Event("change", { bubbles: true }));
       return;
     }
-    if (e.key === "r") {
-      // Purpose: quick toggle for Live related (uses existing change wiring + persistence).
+    if (e.key === "n") {
+      // Purpose: new thread shortcut (matches the UI button).
       e.preventDefault();
-      const el = $("liveRelated");
+      newThread();
+      $("chatInput")?.focus();
+      return;
+    }
+    if (e.key === "w") {
+      // Purpose: toggle Web search on/off (matches the existing toggle + persistence).
+      e.preventDefault();
+      const el = $("useWebSearch");
       if (!el) return;
       el.checked = !el.checked;
       el.dispatchEvent(new Event("change", { bubbles: true }));

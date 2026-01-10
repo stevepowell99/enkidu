@@ -34,10 +34,44 @@ function requireAdmin(event) {
   const auth = normalizeAuthHeaderValue(getAuthHeader(event.headers));
   const expected = normalizeAuthHeaderValue(`Bearer ${adminToken}`);
   if (auth !== expected) {
+    // Purpose: log enough to debug auth mismatches without leaking secrets.
+    // Common causes:
+    // - UI token not saved (empty -> "Bearer" after trim)
+    // - Server token differs from UI token (wrong .env / wrong Cloud Run env var)
+    const authLower = String(auth || "").trim();
+    const hasBearer = authLower.toLowerCase().startsWith("bearer");
+    const gotTokenPart = hasBearer ? authLower.replace(/^bearer\s*/i, "") : "";
+    const gotTokenLen = gotTokenPart.length;
+    const gotTokenHash12 = gotTokenPart
+      ? crypto.createHash("sha256").update(gotTokenPart).digest("hex").slice(0, 12)
+      : "";
+    const expectedTokenHash12 = crypto.createHash("sha256").update(adminToken).digest("hex").slice(0, 12);
+
+    // eslint-disable-next-line no-console
+    console.error("[enkidu] auth_failed", {
+      path: event?.path || "",
+      method: event?.httpMethod || "",
+      got_prefix: auth.slice(0, 7),
+      got_len: auth.length,
+      got_token_len: gotTokenLen,
+      got_token_hash12: gotTokenHash12,
+      expected_len: expected.length,
+      expected_token_hash12: expectedTokenHash12,
+      server_token_len: adminTokenRaw.length,
+      server_token_hash12: crypto.createHash("sha256").update(adminTokenRaw).digest("hex").slice(0, 12),
+      server_token_has_delims: /[,\s]/.test(adminTokenRaw),
+      origin: String(event?.headers?.origin || event?.headers?.Origin || ""),
+      referer: String(event?.headers?.referer || event?.headers?.Referer || ""),
+      ua: String(event?.headers?.["user-agent"] || event?.headers?.["User-Agent"] || ""),
+      hint: gotTokenLen === 0 && hasBearer ? "Client sent Bearer with empty token (UI token likely blank)" : "",
+    });
+
     // Non-sensitive hint for debugging auth mismatches across environments.
     const hint = JSON.stringify({
       got_prefix: auth.slice(0, 7), // typically "Bearer "
       got_len: auth.length,
+      got_token_len: gotTokenLen,
+      got_token_hash12: gotTokenHash12,
       expected_len: expected.length,
       server_token_len: adminTokenRaw.length,
       server_token_hash12: crypto.createHash("sha256").update(adminTokenRaw).digest("hex").slice(0, 12),

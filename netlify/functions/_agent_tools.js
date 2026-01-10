@@ -9,6 +9,7 @@ const { supabaseRequest, supabaseRequestMeta } = require("./_supabase");
 const { assertNoSecrets } = require("./_secrets");
 const { makeEmbeddingFields } = require("./_embeddings");
 const { geminiGenerate } = require("./_gemini");
+const dns = require("dns");
 
 // Optional dependency: only needed for sql_select. Keep normal chat working without it.
 let Pool = null;
@@ -22,6 +23,21 @@ try {
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 let pgPool = null;
+// NOTE: no connection fallbacks. If your DB host is IPv6-only and your network can't reach IPv6,
+// you must use a Supabase pooler hostname (IPv4) for SUPABASE_DB_URL.
+
+function parsePgUrl(url) {
+  // Purpose: safely parse a Postgres connection URL into parts (so we can override host reliably).
+  const u = new URL(String(url || ""));
+  const user = decodeURIComponent(String(u.username || ""));
+  const password = decodeURIComponent(String(u.password || ""));
+  const database = String(u.pathname || "").replace(/^\/+/, "");
+  const port = u.port ? Number(u.port) : 5432;
+  const host = String(u.hostname || "");
+  const sslMode = String(u.searchParams?.get?.("sslmode") || "").toLowerCase();
+  return { user, password, database, port, host, sslMode };
+}
+
 function getPgPool() {
   // Purpose: SELECT-only SQL fallback when PostgREST filters aren't enough.
   if (!Pool) throw new Error('sql_select requires npm dependency "pg" (run npm install)');
@@ -30,12 +46,20 @@ function getPgPool() {
   if (!pgPool) {
     // Purpose: avoid lambda-local 30s hangs on bad DNS/SSL/credentials by failing fast.
     let useSsl = false;
+    let host = "";
     try {
       const u = new URL(url);
-      // Supabase Postgres requires SSL.
-      useSsl = String(u.hostname || "").toLowerCase().endsWith(".supabase.co");
+      host = String(u.hostname || "");
+      const h = host.toLowerCase();
+      const sslMode = String(u.searchParams?.get?.("sslmode") || "").toLowerCase();
+      // Supabase Postgres requires SSL; also respect sslmode=require (common in Supabase URLs).
+      useSsl = h.endsWith(".supabase.co") || h.includes("supabase") || sslMode === "require";
     } catch {
       useSsl = false;
+    }
+    if (String(process.env.ENKIDU_DEBUG_SQL || "").trim() === "1") {
+      // eslint-disable-next-line no-console
+      console.error("[enkidu] sql_select pool", { host, ssl: useSsl });
     }
     pgPool = new Pool({
       connectionString: url,
@@ -46,6 +70,8 @@ function getPgPool() {
   }
   return pgPool;
 }
+
+// (No host override pool)
 
 function clampLimit(raw, { min = 1, max = 200, fallback = 50 } = {}) {
   const n = Number(raw);
@@ -167,6 +193,15 @@ function toolManifest({ allowWebSearch } = {}) {
       name: "sql_select",
       description: "Fallback: run a read-only SQL query (SELECT/CTE only). No UPDATE/DELETE/INSERT.",
       args_schema: { type: "object", properties: { sql: { type: "string" }, max_rows: { type: "number" } }, required: ["sql"] },
+    },
+    {
+      name: "find_duplicate_zotero_citekeys",
+      description:
+        "Find duplicate Zotero/BibTeX citekeys among pages imported from Zotero (uses kv_tags.source='zotero' and kv_tags.zotero_citekey).",
+      args_schema: {
+        type: "object",
+        properties: { limit: { type: "number" } },
+      },
     },
   ];
 
@@ -424,7 +459,49 @@ async function executeTool(name, args, { allowSecrets, allowWebSearch } = {}) {
     const wrapped = `SELECT * FROM (${sql}) AS enkidu_q LIMIT $1`;
 
     const pool = getPgPool();
-    const client = await pool.connect();
+    let client;
+    try {
+      client = await pool.connect();
+    } catch (e) {
+      // Keep this error actionable without leaking the connection string.
+      const url = process.env.SUPABASE_DB_URL || process.env.ENKIDU_DB_URL || "";
+      let host = "";
+      let sslMode = "";
+      try {
+        const u = new URL(url);
+        host = String(u.hostname || "");
+        sslMode = String(u.searchParams?.get?.("sslmode") || "");
+      } catch {}
+      const msg = String(e?.message || e);
+      const code = String(e?.code || "");
+      // Make the failure deterministic and actionable (no fallbacks).
+      let aRecords = [];
+      let aaaaRecords = [];
+      if (host) {
+        try {
+          aRecords = await dns.promises.resolve4(host);
+        } catch {
+          aRecords = [];
+        }
+        try {
+          aaaaRecords = await dns.promises.resolve6(host);
+        } catch {
+          aaaaRecords = [];
+        }
+      }
+      if (host && !aRecords.length && aaaaRecords.length) {
+        throw new Error(
+          `sql_select cannot connect: DB host is IPv6-only (host=${host} dns_a=[] dns_aaaa=${JSON.stringify(
+            aaaaRecords
+          )}). Your network cannot reach IPv6 Postgres endpoints. Fix: enable IPv6 routing, or use an IPv4-capable Supabase connection string (this may require Supabase's IPv4 add-on).`
+        );
+      }
+      throw new Error(
+        `sql_select failed to connect (code=${code || "?"} host=${host || "?"}${sslMode ? ` sslmode=${sslMode}` : ""} dns_a=${JSON.stringify(
+          aRecords
+        )} dns_aaaa=${JSON.stringify(aaaaRecords)}): ${msg}`
+      );
+    }
     try {
       await client.query("BEGIN");
       await client.query("SET LOCAL statement_timeout = '8000ms'");
@@ -444,6 +521,58 @@ async function executeTool(name, args, { allowSecrets, allowWebSearch } = {}) {
     } finally {
       client.release();
     }
+  }
+
+  if (toolName === "find_duplicate_zotero_citekeys") {
+    // Purpose: answer "do we have duplicates?" without requiring direct Postgres access.
+    const limit = clampLimit(a.limit, { min: 1, max: 200, fallback: 50 });
+
+    // Fetch pages where kv_tags contains {"source":"zotero"} (this is how the importer tags them).
+    // Keep response light: only id/title/created_at/kv_tags.
+    const pageSize = 1000;
+    const maxScan = 20000;
+    const pages = [];
+    for (let offset = 0; offset < maxScan; offset += pageSize) {
+      const query =
+        `?select=id,title,created_at,kv_tags` +
+        `&order=created_at.desc` +
+        `&limit=${encodeURIComponent(pageSize)}` +
+        `&offset=${encodeURIComponent(offset)}` +
+        `&kv_tags=cs.${encodeURIComponent(JSON.stringify({ source: "zotero" }))}`;
+      const rows = await supabaseRequest("pages", { query });
+      if (!rows?.length) break;
+      pages.push(...rows);
+      if (rows.length < pageSize) break;
+    }
+
+    const byKey = new Map(); // citekey -> array of {id,title,created_at}
+    for (const p of pages) {
+      const kv = p?.kv_tags;
+      if (!kv || typeof kv !== "object" || Array.isArray(kv)) continue;
+      const key = String(kv.zotero_citekey || "").trim();
+      if (!key) continue;
+      if (!byKey.has(key)) byKey.set(key, []);
+      byKey.get(key).push({
+        id: p.id,
+        title: p.title || null,
+        created_at: p.created_at || null,
+      });
+    }
+
+    const dups = [];
+    for (const [citekey, items] of byKey.entries()) {
+      if (items.length <= 1) continue;
+      dups.push({ citekey, count: items.length, pages: items });
+    }
+
+    dups.sort((a, b) => b.count - a.count || a.citekey.localeCompare(b.citekey));
+    return {
+      scanned_pages: pages.length,
+      duplicate_citekeys: dups.slice(0, limit),
+      duplicate_count: dups.length,
+      truncated: dups.length > limit,
+      note: "Uses kv_tags.source='zotero' and kv_tags.zotero_citekey (as per importer).",
+    };
   }
 
   if (toolName === "web_search") {

@@ -395,6 +395,83 @@ function agentProtocolText({ allowWebSearch } = {}) {
   );
 }
 
+function truncateText(s, maxChars) {
+  const text = String(s ?? "");
+  const n = Number(maxChars);
+  const max = Number.isFinite(n) && n > 0 ? Math.floor(n) : 2000;
+  if (text.length <= max) return text;
+  return text.slice(0, max) + `\n\n...(truncated, ${text.length} chars total)`;
+}
+
+function truncateForPrompt(text, { maxChars, label } = {}) {
+  // Purpose: bound Gemini input size (quota is per-minute input tokens; large context can spike it).
+  const max = Number.isFinite(Number(maxChars)) ? Number(maxChars) : 12000;
+  const s = truncateText(String(text ?? ""), max);
+  if (s === String(text ?? "")) return s;
+  const tag = label ? `\n\n[enkidu] NOTE: truncated ${label} for prompt size.` : "\n\n[enkidu] NOTE: truncated text for prompt size.";
+  return s + tag;
+}
+
+function compactToolResult(toolName, result) {
+  // Purpose: keep Gemini input tokens bounded (tool results can be huge: arrays of pages with long content_md).
+  // Keep enough fields to be useful, but truncate/strip large text payloads.
+  const name = String(toolName || "");
+  const maxChars = Number(process.env.ENKIDU_TOOL_RESULT_MAX_CHARS || 2000);
+
+  function compactPage(p) {
+    if (!p || typeof p !== "object") return p;
+    const content = typeof p.content_md === "string" ? p.content_md : "";
+    const out = {
+      id: p.id ?? null,
+      created_at: p.created_at ?? null,
+      updated_at: p.updated_at ?? null,
+      thread_id: p.thread_id ?? null,
+      next_page_id: p.next_page_id ?? null,
+      title: p.title ?? null,
+      tags: p.tags ?? null,
+      kv_tags: p.kv_tags ?? null,
+      ...(p.distance != null ? { distance: p.distance } : {}),
+    };
+    if (content) {
+      out.content_md_preview = truncateText(content, maxChars);
+      out.content_md_chars = content.length;
+    }
+    return out;
+  }
+
+  // Generic cases
+  if (!result || typeof result !== "object") return result;
+
+  // Pages lists (common)
+  if (Array.isArray(result.pages)) {
+    return { ...result, pages: result.pages.map(compactPage) };
+  }
+
+  // Single page
+  if (result.page && typeof result.page === "object") {
+    return { ...result, page: compactPage(result.page) };
+  }
+
+  // related_to_page returns { source_page, pages }
+  if (result.source_page && typeof result.source_page === "object" && Array.isArray(result.pages)) {
+    return {
+      ...result,
+      source_page: {
+        id: result.source_page.id ?? null,
+        title: result.source_page.title ?? null,
+      },
+      pages: result.pages.map(compactPage),
+    };
+  }
+
+  // Default: cap any very large string fields at the top-level
+  const out = { ...result };
+  for (const [k, v] of Object.entries(out)) {
+    if (typeof v === "string" && v.length > maxChars * 2) out[k] = truncateText(v, maxChars);
+  }
+  return out;
+}
+
 exports.handler = async (event, context) => {
   // Netlify dev (lambda-local) can hang until timeout if the event loop has open handles
   // (e.g., keep-alive sockets from fetch/undici). This matches AWS Lambda best practice.
@@ -501,13 +578,33 @@ exports.handler = async (event, context) => {
     logTiming("loadChatContext", tCtx);
     const contextPages = await loadContextPages(contextPageIds);
 
+    // -------------------------
+    // Prompt size caps (quota control)
+    // -------------------------
+    // Purpose: keep Gemini input bounded even if base pages or selected context pages are huge.
+    const promptMaxPerMsgChars = Number(process.env.ENKIDU_PROMPT_MAX_CHARS_PER_MSG || 12000);
+    const promptMaxContextPageChars = Number(process.env.ENKIDU_PROMPT_MAX_CHARS_PER_CONTEXT_PAGE || 12000);
+    const promptMaxSystemChars = Number(process.env.ENKIDU_PROMPT_MAX_CHARS_SYSTEM || 20000);
+    const promptMaxPrefsChars = Number(process.env.ENKIDU_PROMPT_MAX_CHARS_PREFS || 20000);
+
+    const systemPromptForPrompt = truncateForPrompt(systemPrompt, { maxChars: promptMaxSystemChars, label: "*system" });
+    const prefsTextForPrompt = truncateForPrompt(prefsText, { maxChars: promptMaxPrefsChars, label: "preference base pages" });
+    const historyForPrompt = (history || []).map((m) => ({
+      role: m.role,
+      text: truncateForPrompt(m.text, { maxChars: promptMaxPerMsgChars, label: "history message" }),
+    }));
+
     // Pass selected context pages as a separate user message (keeps system prompt "pure").
     const extraMessages = [];
     if (contextPages.length) {
       const ctx = contextPages
         .map((p) => {
           const t = p.title ? `Title: ${p.title}\n` : "";
-          return `---\n${t}${String(p.content_md || "")}`;
+          const content = truncateForPrompt(String(p.content_md || ""), {
+            maxChars: promptMaxContextPageChars,
+            label: "context page",
+          });
+          return `---\n${t}${content}`;
         })
         .join("\n\n");
       extraMessages.push({ role: "user", text: `Selected context pages:\n${ctx}` });
@@ -532,14 +629,14 @@ exports.handler = async (event, context) => {
     // Agent loop (plan -> tool_call* -> final)
     // -------------------------
     const agentSystem = [
-      String(systemPrompt || "").trim(),
-      String(prefsText || "").trim(),
+      String(systemPromptForPrompt || "").trim(),
+      String(prefsTextForPrompt || "").trim(),
       agentProtocolText({ allowWebSearch: useWebSearch }),
     ]
       .filter(Boolean)
       .join("\n\n");
 
-    const messages = [...history, ...extraMessages, { role: "user", text: message }];
+    const messages = [...historyForPrompt, ...extraMessages, { role: "user", text: message }];
 
     if (debugPromptSizes) {
       const sysLen = agentSystem.length;
@@ -595,6 +692,15 @@ exports.handler = async (event, context) => {
         const args = agent.args && typeof agent.args === "object" && !Array.isArray(agent.args) ? agent.args : {};
         if (!name) throw new Error("Agent tool_call.name is required");
 
+        // Tool arg normalization (robustness against small schema mistakes from the model).
+        // The most common is sql_select using {"query": "..."} instead of {"sql": "..."}.
+        if (name === "sql_select") {
+          if (args && typeof args === "object" && !Array.isArray(args)) {
+            if (typeof args.sql !== "string" && typeof args.query === "string") args.sql = args.query;
+            if (typeof args.sql !== "string" && typeof args.statement === "string") args.sql = args.statement;
+          }
+        }
+
         // Optional: allow the model to include a plan alongside the tool call (saves one extra Gemini call).
         const planText = typeof agent.plan === "string" ? agent.plan.trim() : "";
         if (planText) {
@@ -647,10 +753,11 @@ exports.handler = async (event, context) => {
           result = { error: String(e?.message || e) };
         }
 
+        const compact = compactToolResult(name, result);
         const resultText =
           `Tool result: ${name} (${ok ? "ok" : "error"})\n\n` +
           "```json\n" +
-          JSON.stringify(result, null, 2) +
+          JSON.stringify(compact, null, 2) +
           "\n```";
 
         const resultPageId = await saveChatBubble({
