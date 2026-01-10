@@ -649,6 +649,7 @@ exports.handler = async (event, context) => {
     const stepIds = [];
     let stepIndex = 0;
     let finalText = "";
+    let lastToolResultText = "";
     let finalMeta = null;
     let createdPages = [];
 
@@ -759,6 +760,9 @@ exports.handler = async (event, context) => {
           "```json\n" +
           JSON.stringify(compact, null, 2) +
           "\n```";
+        // Purpose: if the agent never returns a final answer (iteration cap / timeout),
+        // we still return something explicit to the UI instead of an empty reply.
+        lastToolResultText = resultText;
 
         const resultPageId = await saveChatBubble({
           threadId,
@@ -803,6 +807,12 @@ exports.handler = async (event, context) => {
       }
 
       throw new Error(`Unknown agent.type: ${type}`);
+    }
+
+    // If we ran out of iterations (or hit a time budget) without a final answer,
+    // return the last tool result bubble so the user sees an explicit outcome.
+    if (!String(finalText || "").trim() && String(lastToolResultText || "").trim()) {
+      finalText = lastToolResultText;
     }
 
     // Apply existing enkidu_meta footer behavior to final text (optional).

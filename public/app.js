@@ -799,6 +799,17 @@ function collapseJsonCodeBlocks(container) {
     let summaryText = `JSON (${raw.length} chars)`;
     try {
       const parsed = JSON.parse(raw);
+      // Special-case common tool result shapes so the collapsed summary is actually informative.
+      // Examples:
+      // - { pages: [...] } => "pages: N"
+      // - { count: N }    => "count: N"
+      if (parsed && typeof parsed === "object") {
+        if (Array.isArray(parsed.pages)) {
+          summaryText = `JSON (pages: ${parsed.pages.length})`;
+        } else if (Number.isFinite(Number(parsed.count))) {
+          summaryText = `JSON (count: ${Number(parsed.count)})`;
+        }
+      }
       if (Array.isArray(parsed)) {
         summaryText = `JSON array (${parsed.length} items)`;
       } else if (parsed && typeof parsed === "object") {
@@ -2028,6 +2039,9 @@ async function sendChat() {
 
   await loadThreads(data.thread_id);
   await reloadThread();
+  // Refresh Related/Recall after *any* response. Since the chat box is cleared, Related mode
+  // will show most recent pages (when Time is enabled) or recent chat pages (when Time is off).
+  await recallSearch();
   setStatus("Replied.", "success");
 }
 
