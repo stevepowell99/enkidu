@@ -157,6 +157,10 @@ function agentProtocolText() {
     "Notes:\n" +
     "- Use tools only when needed. Prefer minimal steps.\n" +
     "- For writes (create/update/delete), be explicit and cautious.\n" +
+    "- IMPORTANT: avoid search_pages loops. Do NOT call search_pages more than once per Dream run.\n" +
+    "  Start from the provided Seed page ids; use get_page(id) to read, then update_page(id, patch) to improve.\n" +
+    "- You should try to make at least ONE meaningful write (update_page/create_page/delete_page).\n" +
+    '  If you make zero writes, your final diary MUST explain why (e.g. "no safe changes found").\n' +
     "- If you will call a tool, include your short plan in tool_call.plan.\n" +
     "- If you call a tool, wait for the tool result before proceeding.\n\n" +
     toolManifestShortText({ allowWebSearch: false })
@@ -260,7 +264,7 @@ exports.handler = async (event) => {
         text:
           "Seed pages (recent, but you may wander anywhere):\n\n" +
           seedPagesText +
-          "\n\nStart from these, then use tools to explore related pages/threads and consolidate.",
+          "\n\nStart from these ids. Pick ONE seed page, read it with get_page, then do at least one concrete improvement via update_page (or delete_page if truly redundant). Avoid repeated search_pages.",
       },
     ];
 
@@ -270,6 +274,7 @@ exports.handler = async (event) => {
     const deletedIds = new Set();
     const createdIds = new Set();
     const visitedIds = new Set(candidates.map((p) => String(p.id)));
+    const toolCalls = []; // { name, ok, error? } (for diary/debugging)
 
     // Keep it small: background dreaming should be cheap.
     for (let iter = 0; iter < 8; iter++) {
@@ -298,6 +303,7 @@ exports.handler = async (event) => {
           ok = false;
           result = { error: String(e?.message || e) };
         }
+        toolCalls.push({ name, ok, ...(ok ? {} : { error: String(result?.error || "") }) });
 
         // Track ids changed (best effort; keeps diary useful).
         if (ok) {
@@ -333,10 +339,19 @@ exports.handler = async (event) => {
     const updated = updatedIds.size; // For backwards-compatible UI messaging (counts update_page calls).
 
     const diaryTitle = `Dream diary (${new Date().toLocaleString()})`;
+    const toolCallsSummary = toolCalls.length
+      ? `Tool calls (${toolCalls.length}):\n` +
+        toolCalls
+          .slice(0, 50)
+          .map((t) => `- ${t.name} (${t.ok ? "ok" : "error"})${t.ok ? "" : t.error ? `: ${t.error}` : ""}`)
+          .join("\n") +
+        (toolCalls.length > 50 ? "\n- ...(truncated)" : "")
+      : "Tool calls: (none)";
     const diaryContent =
       (finalText ? `${finalText}\n\n` : "") +
       `Seed candidates: ${candidates.length}\n` +
       `Tool calls: ${proposed}\n` +
+      `${toolCallsSummary}\n\n` +
       `Updated pages (${updatedIds.size}):\n` +
       Array.from(updatedIds).map((id) => `- ${id}`).join("\n") +
       `\n\nDeleted pages (${deletedIds.size}):\n` +

@@ -3,7 +3,7 @@
 
 const { requireAdmin } = require("./_auth");
 const { supabaseRequest } = require("./_supabase");
-const { updatePageEmbedding } = require("./_embeddings");
+const { makeEmbeddingFieldsBatchSettled } = require("./_embeddings");
 
 function json(statusCode, obj) {
   return {
@@ -57,29 +57,62 @@ exports.handler = async (event) => {
       });
     }
 
-    let updated = 0;
-    const ids = [];
-    const failed = [];
+    const scanned = (rows || []).length;
+    const items = (rows || [])
+      .map((r) => ({
+        id: String(r?.id || ""),
+        content_md: String(r?.content_md || ""),
+      }))
+      .filter((r) => r.id);
 
-    for (const r of rows || []) {
-      const id = String(r?.id || "");
-      if (!id) continue;
-      try {
-        await updatePageEmbedding({ id, content_md: r?.content_md || "" });
-        updated++;
-        ids.push(id);
-      } catch (err) {
-        // Purpose: don't let one bad page block the rest of the batch/backlog.
-        failed.push({ id, error: String(err?.message || err) });
+    const toEmbed = [];
+    const failed = [];
+    for (const r of items) {
+      if (!r.content_md.trim()) {
+        // Purpose: avoid infinite re-processing of empty pages.
+        failed.push({ id: r.id, error: "Empty content_md (cannot embed)" });
+        continue;
       }
+      toEmbed.push(r);
+    }
+
+    const embedResults = await makeEmbeddingFieldsBatchSettled({
+      contents_md: toEmbed.map((r) => r.content_md),
+      taskType: "RETRIEVAL_DOCUMENT",
+      concurrency: 5,
+    });
+
+    const updates = [];
+    const ids = [];
+    for (let i = 0; i < toEmbed.length; i++) {
+      const id = toEmbed[i].id;
+      const res = embedResults[i];
+      if (!res?.ok) {
+        failed.push({ id, error: String(res?.error || "Embedding failed") });
+        continue;
+      }
+      updates.push({ id, ...res.fields });
+      ids.push(id);
+    }
+
+    if (updates.length) {
+      // Purpose: write embeddings back in one request (much faster than PATCH per page).
+      await supabaseRequest("pages", {
+        method: "POST",
+        query: "?on_conflict=id",
+        preferExtras: ["resolution=merge-duplicates"],
+        returnRepresentation: false,
+        body: updates,
+      });
     }
 
     return json(200, {
-      scanned: (rows || []).length,
-      updated,
+      scanned,
+      updated: updates.length,
       ids,
       failed,
-      remaining_hint: updated === limit ? "More remain. Call again to process next batch." : "Done (no more null embeddings in this batch).",
+      remaining_hint:
+        updates.length === limit ? "More remain. Call again to process next batch." : "Done (no more null embeddings in this batch).",
     });
   } catch (err) {
     return json(500, { error: String(err?.message || err) });

@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <!-- Purpose: simple Enkidu favicon (red "E" on black). -->
+  <rect width="128" height="128" rx="16" fill="#000000" />
+  <text
+    x="64"
+    y="82"
+    text-anchor="middle"
+    font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif"
+    font-size="96"
+    font-weight="800"
+    fill="#e11d48"
+  >
+    E
+  </text>
+</svg>
+
+
