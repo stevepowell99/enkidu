@@ -239,7 +239,12 @@
                     </div>
 
                     <div class="mb-2 enkidu-preview-wrap">
-                      <label class="form-label small mb-1">Rendered (double-click to edit)</label>
+                      <div class="d-flex align-items-center gap-2 mb-1">
+                        <div class="form-label small mb-0">Rendered (double-click to edit)</div>
+                        <button id="copyPreview" type="button" class="btn btn-sm btn-outline-secondary ms-auto" title="Copy markdown to clipboard">
+                          Copy
+                        </button>
+                      </div>
                       <div id="pagePreview" class="border rounded p-2 bg-white enkidu-preview"></div>
                     </div>
 

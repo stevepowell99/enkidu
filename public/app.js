@@ -738,6 +738,48 @@ function escapeHtml(s) {
 
 const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
 
+// -------------------------
+// Single-page thread transcripts (v1)
+// -------------------------
+// Purpose: backend stores one growing page per thread_id; UI parses it into bubbles.
+const THREAD_FORMAT_V1 = "transcript_v1";
+
+function parseTranscriptIntoBubblesV1(content_md) {
+  // Purpose: parse our own v1 transcript format back into chat bubbles for display.
+  const s = String(content_md || "");
+  const turns = [];
+  const re = /(?:^|\n)---\n\[enkidu_turn\]\n([\s\S]*?)(?=(?:\n---\n\[enkidu_turn\]\n)|$)/g;
+  let m;
+  while ((m = re.exec(s))) {
+    const block = String(m[1] || "");
+    const sepIdx = block.indexOf("\n\n");
+    const headerText = sepIdx >= 0 ? block.slice(0, sepIdx) : block.trimEnd();
+    const body = sepIdx >= 0 ? block.slice(sepIdx + 2) : "";
+
+    const hdr = {};
+    for (const line of headerText.split("\n")) {
+      const idx = line.indexOf(":");
+      if (idx < 0) continue;
+      const k = String(line.slice(0, idx)).trim();
+      const v = String(line.slice(idx + 1)).trim();
+      if (!k) continue;
+      hdr[k] = v;
+    }
+
+    const role = String(hdr.role || "").trim();
+    const at = String(hdr.at || "").trim();
+    if (role !== "user" && role !== "assistant") continue;
+
+    turns.push({
+      created_at: at || "",
+      content_md: body,
+      tags: ["*chat"],
+      kv_tags: { role },
+    });
+  }
+  return turns;
+}
+
 function extractUuids(text, { limit = 12 } = {}) {
   const s = String(text || "");
   const out = [];
@@ -1638,9 +1680,12 @@ async function recallSearch() {
     matchers: matchers0,
   });
 
-  // If user typed tag/KV filters WITHOUT any chat text, use server search (filters-only).
-  // When chat text exists, we keep "Related" behavior and apply tag/KV as additive filters.
-  if (hasFilters && !chatText) {
+  // If user typed tag/KV filters, prefer server search (fast, deterministic).
+  // Exception: keep the old "Related + additive filters" behavior when chat text exists,
+  // unless the tag is a starred/base tag (e.g. *bio) where users typically expect direct lookup.
+  const isStarTag = tag && tag.startsWith("*");
+  const forceServerSearch = hasFilters && (!chatText || isStarTag);
+  if (forceServerSearch) {
     if ((kvKey && !kvValue) || (!kvKey && kvValue)) {
       throw new Error("KV filter requires both key and value");
     }
@@ -1653,6 +1698,11 @@ async function recallSearch() {
     dbg("recallSearch:serverSearch", { params });
     const data = await apiFetch(`/api/pages?${params.join("&")}`);
     renderRecallResults(data.pages);
+    // If searching for a starred/base tag, auto-open the first result (newest-first from the server).
+    const firstId = data?.pages?.[0]?.id || "";
+    if (isStarTag && firstId && firstId !== selectedPageId) {
+      await openPageById(firstId);
+    }
     setStatus(`Found ${data.pages?.length || 0} pages.`, "success");
     dbg("recallSearch:serverSearch:done", { count: data.pages?.length || 0 });
     return;
@@ -1985,6 +2035,16 @@ function renderChatLog(pages) {
   root.scrollTop = root.scrollHeight;
 }
 
+function renderChatLogBubbles(bubbles) {
+  // Purpose: render already-chronological bubbles (used for transcript threads).
+  const root = $("chatLog");
+  root.innerHTML = "";
+  for (const p of bubbles || []) {
+    root.appendChild(makeChatMsgDiv(p));
+  }
+  root.scrollTop = root.scrollHeight;
+}
+
 async function reloadThread() {
   const threadId = ($("threadSelect").value || "").trim();
   if (!threadId) {
@@ -1994,8 +2054,19 @@ async function reloadThread() {
 
   setStatus("Loading thread...", "secondary");
   const data = await apiFetch(`/api/pages?limit=100&thread_id=${encodeURIComponent(threadId)}&tag=*chat`);
-  renderChatLog(data.pages);
-  setStatus(`Loaded ${data.pages?.length || 0} messages.`, "success");
+  const pages = data.pages || [];
+
+  // Transcript mode: one page per thread_id; parse it into bubbles.
+  if (pages.length === 1 && pages[0]?.kv_tags?.thread_format === THREAD_FORMAT_V1) {
+    const bubbles = parseTranscriptIntoBubblesV1(pages[0]?.content_md || "");
+    renderChatLogBubbles(bubbles);
+    setStatus(`Loaded ${bubbles.length} messages.`, "success");
+    return;
+  }
+
+  // Legacy mode: many pages per thread_id (one per bubble).
+  renderChatLog(pages);
+  setStatus(`Loaded ${pages.length || 0} messages.`, "success");
 }
 
 async function deleteThread() {
@@ -2190,6 +2261,16 @@ function init() {
     }
   });
   $("newPage").onclick = () => setSelectedPage(null, { newMode: true });
+  $("copyPreview")?.addEventListener("click", async () => {
+    // Purpose: quick-copy the current page markdown while in preview mode.
+    try {
+      const md = String($("pageContent")?.value || "");
+      await navigator.clipboard.writeText(md);
+      setStatus("Copied markdown to clipboard.", "success");
+    } catch (e) {
+      setStatus(String(e?.message || e || "Copy failed"), "danger");
+    }
+  });
   $("pageTagPreset")?.addEventListener("change", () => {
     // Purpose: add a predefined tag set to the Tags box (deduped).
     const sel = $("pageTagPreset");
@@ -2492,13 +2573,8 @@ function init() {
     loadModels().catch(() => {});
     (async () => {
       await loadThreads();
-      // Purpose: on reload, default to most recent chat thread (first option after "(new thread)").
-      const sel = $("threadSelect");
-      const mostRecent = sel?.options?.[1]?.value || "";
-      if (mostRecent) {
-        sel.value = mostRecent;
-        await reloadThread();
-      }
+      // Purpose: on reload, default to a NEW chat (do not auto-load the most recent thread).
+      newThread();
     })().catch(() => {});
     ensureRecentPagesCache().catch(() => {});
   }

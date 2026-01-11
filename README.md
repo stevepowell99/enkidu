@@ -61,7 +61,9 @@ Enkidu
   - Fields: `title`, `content_md`, `tags`, `kv_tags`, `thread_id`, `next_page_id`, timestamps
 - **Auth**: single shared token `ENKIDU_ADMIN_TOKEN` (Bearer token on every `/api/*` call)
 - **Netlify Functions API** (see `netlify/functions/`)
-  - `POST /api/chat`: calls Gemini + runs a simple **agent loop** + saves each “bubble” as a page (same `thread_id`)
+  - `POST /api/chat`: calls Gemini + runs a simple **agent loop** and saves chat under a `thread_id`
+    - **New threads (current default)**: stored as **one page per thread** (a growing transcript). Each user/assistant turn is appended to that page (`kv_tags.thread_format="transcript_v1"`). UI parses it into bubbles.
+    - **Legacy threads (until backfill)**: stored as many pages (one per bubble) sharing the same `thread_id`.
     - **Context payload**: UI can select pages (checkboxes in Recall list) and send them as `context_page_ids` to be injected into the system instruction for that chat request
     - **Soft-coded system prompt**: system prompt comes from the most recent `*system` base page
     - **Prompt cards excluded from normal chat injection**: `*dream-prompt` / `*split-prompt`
@@ -73,12 +75,7 @@ Enkidu
         - `tool_call` (one tool invocation)
         - `final` (final answer)
       - The server executes allowlisted tools and feeds the result back to the model, iterating up to a small cap.
-      - Each step is stored as its own chat bubble in `public.pages` (so you can see the plan + each tool call + each tool result).
-      - Bubble metadata is stored in `kv_tags`:
-        - `role`: `"user"` / `"assistant"`
-        - `bubble_kind`: `"plan" | "tool_call" | "tool_result" | "final"`
-        - `tool_name`, `tool_call_id`, `step_index` (for tool bubbles)
-      - To keep `netlify dev` from timing out, intermediate bubbles (`plan`, `tool_call`, `tool_result`) do **not** generate embeddings; user/final bubbles still do.
+      - Note: in transcript-mode threads we currently store only user/assistant turns in the transcript page (we do not persist per-step tool bubbles).
     - **Agent allowlisted tools** (no raw SQL):
       - `search_pages`: substring search + filters over `public.pages`
       - `related_pages`: semantic vector search using pgvector (`rpc/match_pages`) from a query string
@@ -94,7 +91,7 @@ Enkidu
   - `GET/PUT/DELETE /api/page?id=...`: fetch/update/delete a page
   - `GET /api/tags`: returns distinct tags (from recent pages)
   - `GET /api/models`: lists available Gemini models for your API key (ListModels)
-  - `GET /api/threads`: lists recent chat threads (dropdown labels are latest timestamps, desc)
+  - `GET /api/threads`: lists recent chat threads (dropdown labels are latest activity timestamps, desc)
   - `POST /api/dream`: manual Dream run (UI button) that updates some recent pages (titles/tags/kv_tags) per the `*dream-prompt` base page, then writes a `*dream-diary` page summarising changes
 - **Gemini model selection**
   - UI dropdown populated from `/api/models`

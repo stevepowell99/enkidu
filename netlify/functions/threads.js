@@ -1,5 +1,5 @@
 // GET /api/threads
-// Purpose: list recent chat threads for a dropdown (sorted by most recent message).
+// Purpose: list recent chat threads for a dropdown (sorted by most recent activity).
 
 const { requireAdmin } = require("./_auth");
 const { supabaseRequest, supabaseRequestMeta } = require("./_supabase");
@@ -65,20 +65,23 @@ exports.handler = async (event) => {
     const CHAT_TAG = "*chat";
     const rows = await supabaseRequest("pages", {
       query:
-        "?select=thread_id,created_at,title,kv_tags" +
+        "?select=thread_id,created_at,updated_at,title,kv_tags" +
         `&tags=cs.{${encodeURIComponent(CHAT_TAG)}}` +
+        // IMPORTANT: transcript threads are a single page whose updated_at moves forward on each append.
+        // Legacy threads have many pages, so created_at still captures recency.
+        "&order=updated_at.desc" +
         "&order=created_at.desc" +
         "&limit=2000",
     });
 
-    const latestByThread = new Map(); // thread_id -> created_at of latest message
+    const latestByThread = new Map(); // thread_id -> latest activity timestamp (updated_at preferred)
     const titleByThread = new Map(); // thread_id -> last known thread title
     for (const r of rows || []) {
       const tid = r?.thread_id;
       if (!tid) continue;
 
-      // First time we see a thread is the latest created_at (because rows are desc).
-      if (!latestByThread.has(tid)) latestByThread.set(tid, r.created_at);
+      // First time we see a thread is the latest activity (because rows are desc).
+      if (!latestByThread.has(tid)) latestByThread.set(tid, r.updated_at || r.created_at);
 
       // Thread title: prefer the most recent assistant-provided kv_tags.thread_title,
       // else fall back to the page title. (Stop once we have one.)

@@ -67,6 +67,30 @@ function toolManifest({ allowWebSearch } = {}) {
       },
     },
     {
+      name: "append_text_to_starred_page",
+      description: "Append text to the most recent page with a given starred tag (e.g. *bio).",
+      args_schema: {
+        type: "object",
+        properties: {
+          star: { type: "string" }, // e.g. "bio" or "*bio"
+          text: { type: "string" },
+        },
+        required: ["star", "text"],
+      },
+    },
+    {
+      name: "update_text_of_starred_page",
+      description: "Replace content_md of the most recent page with a given starred tag (e.g. *bio).",
+      args_schema: {
+        type: "object",
+        properties: {
+          star: { type: "string" }, // e.g. "bio" or "*bio"
+          text: { type: "string" },
+        },
+        required: ["star", "text"],
+      },
+    },
+    {
       name: "related_pages",
       description: "Semantic vector search over pages (pgvector) given a query string.",
       args_schema: {
@@ -185,7 +209,11 @@ function toolManifestShortText({ allowWebSearch } = {}) {
     const name = String(t?.name || "").trim();
     const desc = String(t?.description || "").trim();
     if (!name) continue;
-    lines.push(`- ${name}: ${desc}`);
+    // Include required arg names so the model doesn't guess (e.g. related_pages requires query_text).
+    const schema = t?.args_schema && typeof t.args_schema === "object" ? t.args_schema : null;
+    const required = Array.isArray(schema?.required) ? schema.required.map((x) => String(x).trim()).filter(Boolean) : [];
+    const sig = required.length ? `${name}(${required.join(", ")})` : `${name}()`;
+    lines.push(`- ${sig}: ${desc}`);
   }
   lines.push("");
   lines.push("Tool calling rules:");
@@ -234,6 +262,69 @@ async function executeTool(name, args, { allowSecrets, allowWebSearch } = {}) {
 
     const rows = await supabaseRequest("pages", { query });
     return { pages: rows || [] };
+  }
+
+  if (toolName === "append_text_to_starred_page") {
+    // Purpose: let the agent update stable “base pages” by tag without an extra search step.
+    const rawStar = safeString(a.star, { maxLen: 50 }).trim();
+    const text = safeString(a.text, { maxLen: 200000 });
+    if (!rawStar) throw new Error("star is required");
+    if (!String(text || "").trim()) throw new Error("text is required");
+
+    // Normalize: accept "bio" or "*bio".
+    const star = rawStar.startsWith("*") ? rawStar.slice(1) : rawStar;
+    if (!/^[a-z0-9][a-z0-9-_]*$/i.test(star)) throw new Error("star must be an identifier like bio|style|strategy");
+    const tag = `*${star}`;
+
+    // Find the most recent page with this tag.
+    const rows = await supabaseRequest("pages", {
+      query:
+        `?select=id,content_md,created_at,updated_at,title,tags,kv_tags` +
+        `&tags=cs.{${encodeURIComponent(tag)}}` +
+        `&order=created_at.desc` +
+        `&limit=1`,
+    });
+    const page = rows?.[0] || null;
+    if (!page?.id) throw new Error(`No page found with tag ${tag}`);
+
+    const prev = String(page.content_md || "");
+    const next = prev
+      ? prev.endsWith("\n")
+        ? prev + "\n" + text
+        : prev + "\n\n" + text
+      : text;
+
+    // Reuse update_page for validation + secret checks + embedding clearing.
+    const updated = await executeTool("update_page", { id: page.id, patch: { content_md: next } }, { allowSecrets, allowWebSearch });
+    return { tag, page: updated?.page || null, appended_chars: String(text).length };
+  }
+
+  if (toolName === "update_text_of_starred_page") {
+    // Purpose: let the agent update stable “base pages” by tag without an extra search step.
+    const rawStar = safeString(a.star, { maxLen: 50 }).trim();
+    const text = safeString(a.text, { maxLen: 200000 });
+    if (!rawStar) throw new Error("star is required");
+    if (!String(text || "").trim()) throw new Error("text is required");
+
+    // Normalize: accept "bio" or "*bio".
+    const star = rawStar.startsWith("*") ? rawStar.slice(1) : rawStar;
+    if (!/^[a-z0-9][a-z0-9-_]*$/i.test(star)) throw new Error("star must be an identifier like bio|style|strategy");
+    const tag = `*${star}`;
+
+    // Find the most recent page with this tag.
+    const rows = await supabaseRequest("pages", {
+      query:
+        `?select=id,content_md,created_at,updated_at,title,tags,kv_tags` +
+        `&tags=cs.{${encodeURIComponent(tag)}}` +
+        `&order=created_at.desc` +
+        `&limit=1`,
+    });
+    const page = rows?.[0] || null;
+    if (!page?.id) throw new Error(`No page found with tag ${tag}`);
+
+    // Reuse update_page for validation + secret checks + embedding clearing.
+    const updated = await executeTool("update_page", { id: page.id, patch: { content_md: text } }, { allowSecrets, allowWebSearch });
+    return { tag, page: updated?.page || null, replaced_chars: String(text).length };
   }
 
   if (toolName === "related_pages") {

@@ -10,6 +10,102 @@ const { geminiGenerate } = require("./_gemini");
 const { makeEmbeddingFieldsBatch } = require("./_embeddings");
 const { toolManifestShortText, executeTool } = require("./_agent_tools");
 
+// -------------------------
+// Single-page thread transcripts (v1)
+// -------------------------
+// Purpose: store one growing page per thread_id, and parse it client-side into bubbles.
+const THREAD_FORMAT_V1 = "transcript_v1";
+
+function makeTranscriptTurn({ role, atIso, text } = {}) {
+  // Purpose: append-only, parseable block format.
+  const r = String(role || "").trim();
+  if (r !== "user" && r !== "assistant") throw new Error("Transcript turn role must be user|assistant");
+  const at = String(atIso || new Date().toISOString()).trim();
+  const body = String(text ?? "");
+  return `---\n[enkidu_turn]\nrole: ${r}\nat: ${at}\n\n${body}\n`;
+}
+
+function parseTranscriptTurnsV1(content_md) {
+  // Purpose: parse our own v1 transcript format back into turns for prompt history.
+  const s = String(content_md || "");
+  const turns = [];
+  const re = /(?:^|\n)---\n\[enkidu_turn\]\n([\s\S]*?)(?=(?:\n---\n\[enkidu_turn\]\n)|$)/g;
+  let m;
+  while ((m = re.exec(s))) {
+    const block = String(m[1] || "");
+    const sepIdx = block.indexOf("\n\n");
+    const headerText = sepIdx >= 0 ? block.slice(0, sepIdx) : block.trimEnd();
+    const body = sepIdx >= 0 ? block.slice(sepIdx + 2) : "";
+
+    const hdr = {};
+    for (const line of headerText.split("\n")) {
+      const idx = line.indexOf(":");
+      if (idx < 0) continue;
+      const k = String(line.slice(0, idx)).trim();
+      const v = String(line.slice(idx + 1)).trim();
+      if (!k) continue;
+      hdr[k] = v;
+    }
+
+    const role = String(hdr.role || "").trim();
+    const at = String(hdr.at || "").trim();
+    if (role !== "user" && role !== "assistant") continue;
+    turns.push({ role, at, text: body });
+  }
+  return turns;
+}
+
+async function findTranscriptThreadPage(threadId) {
+  // Purpose: detect whether this thread is already in transcript format.
+  const tid = String(threadId || "").trim();
+  if (!tid) return null;
+  const filter = encodeURIComponent(JSON.stringify({ thread_format: THREAD_FORMAT_V1 }));
+  const rows = await supabaseRequest("pages", {
+    query:
+      `?select=id,content_md,kv_tags,created_at,updated_at` +
+      `&thread_id=eq.${encodeURIComponent(tid)}` +
+      `&kv_tags=cs.${filter}` +
+      `&limit=1`,
+  });
+  return rows?.[0] || null;
+}
+
+async function createTranscriptThreadPage({ threadId, threadTitle }) {
+  // Purpose: create the single canonical page for this thread.
+  const tt = String(threadTitle || "").trim();
+  // Purpose: keep thread labels meaningful in /api/threads and UI dropdown (fallback to timestamps is poor UX).
+  const kv = { thread_format: THREAD_FORMAT_V1, ...(tt ? { thread_title: tt } : {}) };
+  const rows = await supabaseRequest("pages", {
+    method: "POST",
+    query: "?select=id,content_md,kv_tags,created_at,updated_at",
+    body: {
+      thread_id: threadId,
+      // Store a human title on the thread page itself (helps /api/threads even if kv_tags is missing/older).
+      title: tt || null,
+      content_md: "",
+      tags: ["*chat"],
+      kv_tags: kv,
+      next_page_id: null,
+    },
+  });
+  return rows?.[0] || null;
+}
+
+async function appendToTranscriptPage({ pageId, prevContentMd, extraMd, kvPatch }) {
+  // Purpose: append to content_md and optionally patch kv_tags in one write.
+  const prev = String(prevContentMd || "");
+  const add = String(extraMd || "");
+  const next = prev ? (prev.endsWith("\n") ? prev + add : prev + "\n" + add) : add;
+  const body = { content_md: next };
+  if (kvPatch && typeof kvPatch === "object") body.kv_tags = kvPatch;
+  const rows = await supabaseRequest("pages", {
+    method: "PATCH",
+    query: `?id=eq.${encodeURIComponent(pageId)}&select=id,content_md,kv_tags,created_at,updated_at`,
+    body,
+  });
+  return rows?.[0] || null;
+}
+
 function dumpActiveHandles(label) {
   // Purpose: debug Netlify dev (lambda-local) timeouts where the response succeeds but the event loop won't drain.
   // Opt-in via env: ENKIDU_DEBUG_HANDLES=1
@@ -388,6 +484,8 @@ function agentProtocolText({ allowWebSearch } = {}) {
     "- Use tools only when needed. Prefer minimal steps.\n" +
     "- For writes (create/update/delete), be explicit and cautious.\n" +
     "- Base pages like *bio/*style/*strategy are already included in your system instruction.\n" +
+    "- If the user explicitly names a starred base page (e.g. \"update *bio\" / \"update *system\" / \"update *style\" / \"update *strategy\"), DO NOT call related_pages or search_pages.\n" +
+    "  Use update_text_of_starred_page (replace) or append_text_to_starred_page (append).\n" +
     "- IMPORTANT: if you will call a tool, include your short plan in tool_call.plan (so we can do it in one round-trip).\n" +
     "- If you call a tool, wait for the tool result before proceeding.\n\n" +
     toolManifestShortText({ allowWebSearch })
@@ -531,6 +629,214 @@ exports.handler = async (event, context) => {
     assertNoSecrets(message, { allow: allowSecrets });
 
     if (!threadId) threadId = crypto.randomUUID();
+
+    // -------------------------
+    // Transcript mode (v1): one page per thread_id
+    // -------------------------
+    // Dual-mode: if a transcript page exists, use it; otherwise fall back to legacy behavior.
+    // New threads always start in transcript mode.
+    let transcriptPage = await findTranscriptThreadPage(threadId);
+    if (isNewThread || transcriptPage) {
+      // Create transcript page if needed.
+      if (!transcriptPage) {
+        const fallbackThreadTitle = String(message || "")
+          .trim()
+          .split(/\r?\n/g)[0]
+          .replace(/\s+/g, " ")
+          .slice(0, 80);
+        transcriptPage = await createTranscriptThreadPage({
+          threadId,
+          threadTitle: fallbackThreadTitle || "",
+        });
+      }
+
+      // Build prompt context: base pages + recent transcript turns.
+      const tCtx = t0();
+      const systemPrompt = await loadSystemPromptText();
+      const prefsText = await loadPreferenceBasePagesText();
+      logTiming("loadChatContext", tCtx);
+      const contextPages = await loadContextPages(contextPageIds);
+
+      const promptMaxPerMsgChars = Number(process.env.ENKIDU_PROMPT_MAX_CHARS_PER_MSG || 12000);
+      const promptMaxContextPageChars = Number(process.env.ENKIDU_PROMPT_MAX_CHARS_PER_CONTEXT_PAGE || 12000);
+      const promptMaxSystemChars = Number(process.env.ENKIDU_PROMPT_MAX_CHARS_SYSTEM || 20000);
+      const promptMaxPrefsChars = Number(process.env.ENKIDU_PROMPT_MAX_CHARS_PREFS || 20000);
+
+      const systemPromptForPrompt = truncateForPrompt(systemPrompt, { maxChars: promptMaxSystemChars, label: "*system" });
+      const prefsTextForPrompt = truncateForPrompt(prefsText, { maxChars: promptMaxPrefsChars, label: "preference base pages" });
+
+      const historyTurns = parseTranscriptTurnsV1(transcriptPage?.content_md || "");
+      const historyForPrompt = historyTurns
+        .filter((t) => t.role === "user" || t.role === "assistant")
+        .slice(-12)
+        .map((t) => ({
+          role: t.role === "assistant" ? "model" : "user",
+          text: truncateForPrompt(String(t.text || ""), { maxChars: promptMaxPerMsgChars, label: "history message" }),
+        }));
+
+      // Selected context pages (kept as separate user message).
+      const extraMessages = [];
+      if (contextPages.length) {
+        const ctx = contextPages
+          .map((p) => {
+            const t = p.title ? `Title: ${p.title}\n` : "";
+            const content = truncateForPrompt(String(p.content_md || ""), {
+              maxChars: promptMaxContextPageChars,
+              label: "context page",
+            });
+            return `---\n${t}${content}`;
+          })
+          .join("\n\n");
+        extraMessages.push({ role: "user", text: `Selected context pages:\n${ctx}` });
+      }
+
+      // Append the user turn immediately (so history is durable even if Gemini errors).
+      const userTurn = makeTranscriptTurn({ role: "user", atIso: new Date().toISOString(), text: message });
+      transcriptPage = await appendToTranscriptPage({
+        pageId: transcriptPage.id,
+        prevContentMd: transcriptPage.content_md,
+        extraMd: userTurn,
+      });
+
+      // Agent system instruction (unchanged protocol).
+      const agentSystem = [
+        String(systemPromptForPrompt || "").trim(),
+        String(prefsTextForPrompt || "").trim(),
+        agentProtocolText({ allowWebSearch: useWebSearch }),
+      ]
+        .filter(Boolean)
+        .join("\n\n");
+      const messages = [...historyForPrompt, ...extraMessages, { role: "user", text: message }];
+
+      if (debugPromptSizes) {
+        const sysLen = agentSystem.length;
+        const msgsLen = messages.reduce((sum, m) => sum + String(m?.text || "").length, 0);
+        const approxTokens = Math.ceil((sysLen + msgsLen) / 4); // very rough
+        console.error(
+          `[enkidu] prompt_sizes sysChars=${sysLen} msgsChars=${msgsLen} msgs=${messages.length} approxTokens=${approxTokens}`
+        );
+      }
+
+      let finalText = "";
+      let lastToolResultText = "";
+      let finalMeta = null;
+      let createdPages = [];
+
+      // Keep small to avoid Netlify dev lambda-local 30s timeouts.
+      for (let iter = 0; iter < 4; iter++) {
+        if (isNetlifyDev && Date.now() - startedAtMs > netlifyDevHardBudgetMs) break;
+        const tGem = t0();
+        const raw = await geminiGenerate({ system: agentSystem, messages, model });
+        logTiming("geminiGenerate", tGem);
+        const { agent } = extractEnkiduAgentEnvelope(raw);
+
+        // If the model didn't comply, treat as a final answer.
+        if (!agent || typeof agent !== "object") {
+          finalText = String(raw || "");
+          break;
+        }
+
+        const type = String(agent.type || "").trim();
+
+        if (type === "plan") {
+          const text = String(agent.text || "").trim();
+          if (text) messages.push({ role: "model", text });
+          continue;
+        }
+
+        if (type === "tool_call") {
+          const name = String(agent.name || "").trim();
+          const args = agent.args && typeof agent.args === "object" && !Array.isArray(agent.args) ? agent.args : {};
+          if (!name) throw new Error("Agent tool_call.name is required");
+
+          const planText = typeof agent.plan === "string" ? agent.plan.trim() : "";
+          if (planText) messages.push({ role: "model", text: planText });
+
+          const callText =
+            `Tool call: ${name}\n\n` +
+            "Args:\n" +
+            "```json\n" +
+            JSON.stringify(args, null, 2) +
+            "\n```";
+          messages.push({ role: "model", text: callText });
+
+          let result;
+          let ok = true;
+          try {
+            result = await executeTool(name, args, { allowSecrets, allowWebSearch: useWebSearch });
+          } catch (e) {
+            ok = false;
+            result = { error: String(e?.message || e) };
+          }
+          const compact = compactToolResult(name, result);
+          const resultText =
+            `Tool result: ${name} (${ok ? "ok" : "error"})\n\n` +
+            "```json\n" +
+            JSON.stringify(compact, null, 2) +
+            "\n```";
+          lastToolResultText = resultText;
+          messages.push({ role: "user", text: resultText });
+
+          // Netlify dev (lambda-local) hard time limit: don't do a second Gemini call.
+          if (isNetlifyDev) {
+            finalText = resultText;
+            break;
+          }
+          continue;
+        }
+
+        if (type === "final") {
+          finalText = String(agent.text || "");
+          break;
+        }
+
+        throw new Error(`Unknown agent.type: ${type}`);
+      }
+
+      if (!String(finalText || "").trim() && String(lastToolResultText || "").trim()) {
+        finalText = lastToolResultText;
+      }
+
+      // If the model returned an agent envelope as raw text, unwrap it.
+      const reparsed = extractEnkiduAgentEnvelope(finalText);
+      if (reparsed?.agent && typeof reparsed.agent === "object") {
+        const t = String(reparsed.agent.type || "").trim();
+        if (t === "final" && typeof reparsed.agent.text === "string") {
+          finalText = reparsed.agent.text;
+        }
+      }
+
+      const { cleaned: cleanedFinal, meta } = extractEnkiduMeta(finalText);
+      finalMeta = meta || null;
+      let reply = String(cleanedFinal || "");
+      if (!reply.trim()) reply = "(empty reply)";
+
+      createdPages = finalMeta ? await createPagesFromMeta(finalMeta, { allowSecrets }) : [];
+
+      // Update thread title if suggested (stored on the transcript page kv_tags).
+      const suggestedThreadTitle =
+        typeof finalMeta?.suggested_thread_title === "string" ? finalMeta.suggested_thread_title.trim() : "";
+      const nextKv = transcriptPage?.kv_tags && typeof transcriptPage.kv_tags === "object" ? { ...transcriptPage.kv_tags } : {};
+      if (suggestedThreadTitle) nextKv.thread_title = suggestedThreadTitle;
+
+      // Append assistant reply to transcript page.
+      assertNoSecrets(reply, { allow: allowSecrets });
+      const assistantTurn = makeTranscriptTurn({ role: "assistant", atIso: new Date().toISOString(), text: reply });
+      transcriptPage = await appendToTranscriptPage({
+        pageId: transcriptPage.id,
+        prevContentMd: transcriptPage.content_md,
+        extraMd: assistantTurn,
+        kvPatch: nextKv,
+      });
+
+      return json(200, {
+        thread_id: threadId,
+        reply,
+        meta: finalMeta,
+        // Only include split-created pages (not the transcript thread page) to avoid embedding backfill on huge transcripts.
+        created_pages: Array.from(new Set(createdPages.map((p) => p.id).filter(Boolean))),
+      });
+    }
 
     // NOTE: intentionally no direct "raw SQL" shortcut in chat.
 
