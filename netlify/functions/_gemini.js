@@ -1,6 +1,8 @@
 // Gemini (Google AI Studio) helper.
 // Purpose: keep Gemini API key server-side only, and keep fetch code in one place.
 
+const crypto = require("crypto");
+
 // Netlify dev (lambda-local) can hang until timeout if Node's fetch keeps sockets alive.
 // Configure undici to close idle sockets quickly (safe in prod; helps a lot in local dev).
 try {
@@ -11,6 +13,13 @@ try {
   // If undici isn't available for some reason, do nothing.
 }
 
+function keyFingerprint(apiKey) {
+  // Purpose: debug env issues without leaking the actual key (hash prefix only).
+  const s = String(apiKey || "");
+  if (!s) return "missing";
+  return crypto.createHash("sha256").update(s).digest("hex").slice(0, 10);
+}
+
 function getGeminiConfig() {
   const apiKey = process.env.GEMINI_API_KEY;
   // Default model (Jan 2026): keep aligned with the UI default.
@@ -18,7 +27,7 @@ function getGeminiConfig() {
   // Default embeddings model: stable + cheap enough for personal scale.
   const embedModel = process.env.GEMINI_EMBED_MODEL || "text-embedding-004";
   if (!apiKey) throw new Error("Missing GEMINI_API_KEY");
-  return { apiKey, model, embedModel };
+  return { apiKey, key_fp: keyFingerprint(apiKey), model, embedModel };
 }
 
 function normalizeModelName(model) {
@@ -29,6 +38,7 @@ function normalizeModelName(model) {
 async function geminiGenerate({ system, messages, model, tools, timeoutMs } = {}) {
   const cfg = getGeminiConfig();
   const apiKey = cfg.apiKey;
+  const keyFp = cfg.key_fp;
   const modelName = normalizeModelName(model || cfg.model);
 
   // AI Studio Gemini API (Generative Language API)
@@ -74,7 +84,7 @@ async function geminiGenerate({ system, messages, model, tools, timeoutMs } = {}
   const json = await res.json().catch(() => null);
   if (!res.ok) {
     const msg = json ? JSON.stringify(json) : `${res.status} ${res.statusText}`;
-    throw new Error(`Gemini error: ${msg}`);
+    throw new Error(`Gemini error (key_fp=${keyFp}): ${msg}`);
   }
 
   const text =
@@ -86,6 +96,7 @@ async function geminiEmbed({ text, model, taskType = "RETRIEVAL_DOCUMENT", timeo
   // Purpose: server-side embeddings for storing in pgvector.
   const cfg = getGeminiConfig();
   const apiKey = cfg.apiKey;
+  const keyFp = cfg.key_fp;
   const modelName = normalizeModelName(model || cfg.embedModel);
 
   // AI Studio Gemini API (Generative Language API)
@@ -124,7 +135,7 @@ async function geminiEmbed({ text, model, taskType = "RETRIEVAL_DOCUMENT", timeo
   const json = await res.json().catch(() => null);
   if (!res.ok) {
     const msg = json ? JSON.stringify(json) : `${res.status} ${res.statusText}`;
-    throw new Error(`Gemini embed error: ${msg}`);
+    throw new Error(`Gemini embed error (key_fp=${keyFp}): ${msg}`);
   }
 
   const values = json?.embedding?.values;
@@ -138,6 +149,7 @@ async function geminiBatchEmbed({ texts, model, taskType = "RETRIEVAL_DOCUMENT",
   // Purpose: batch embeddings to avoid per-page API calls (important for multi-page writes).
   const cfg = getGeminiConfig();
   const apiKey = cfg.apiKey;
+  const keyFp = cfg.key_fp;
   const modelName = normalizeModelName(model || cfg.embedModel);
 
   const items = Array.isArray(texts) ? texts.map((t) => String(t || "")) : [];
@@ -182,7 +194,7 @@ async function geminiBatchEmbed({ texts, model, taskType = "RETRIEVAL_DOCUMENT",
   const json = await res.json().catch(() => null);
   if (!res.ok) {
     const msg = json ? JSON.stringify(json) : `${res.status} ${res.statusText}`;
-    throw new Error(`Gemini batch embed error (model=${modelName}): ${msg}`);
+    throw new Error(`Gemini batch embed error (key_fp=${keyFp}, model=${modelName}): ${msg}`);
   }
 
   const embeddings = json?.embeddings;
