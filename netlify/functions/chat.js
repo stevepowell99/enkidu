@@ -10,6 +10,7 @@ const { geminiGenerate } = require("./_gemini");
 const { makeEmbeddingFieldsBatch } = require("./_embeddings");
 const { toolManifestShortText, executeTool } = require("./_agent_tools");
 
+
 // -------------------------
 // Single-page thread transcripts (v1)
 // -------------------------
