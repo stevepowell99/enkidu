@@ -325,6 +325,70 @@ function extractEnkiduAgentEnvelope(text) {
     if (agent) return { cleaned: trimmed.slice(0, trimmed.length - tail.length + i).trimEnd(), agent };
   }
 
+  // Fallback: sometimes the model outputs our "Tool call: ..." bubble format as plain text
+  // instead of the required {"enkidu_agent": ...} JSON. Parse it so the tool actually runs.
+  //
+  // Expected loose format (as text, typically at end of response):
+  //   <optional plan prose>
+  //   Tool call: web_search
+  //
+  //   Args:
+  //   ```json
+  //   {"query":"..."}
+  //   ```
+  function tryParseLooseToolCall(s) {
+    const t = String(s || "").trim();
+    const idx = t.lastIndexOf("Tool call:");
+    if (idx < 0) return null;
+    const before = t.slice(0, idx).trim();
+    const after = t.slice(idx).trim();
+
+    const firstNl = after.indexOf("\n");
+    const head = firstNl >= 0 ? after.slice(0, firstNl) : after;
+    const nameRaw = head.replace(/^Tool call:\s*/i, "").trim();
+    const name = nameRaw.split(/\s+/g)[0] || "";
+    if (!name) return null;
+
+    const argsIdx = after.search(/\nArgs:\s*\n/i);
+    if (argsIdx < 0) return null;
+    const argsPart = after.slice(argsIdx).replace(/^\nArgs:\s*\n/i, "").trim();
+
+    // Prefer fenced JSON (```json ... ```), but also accept a raw {...} blob.
+    const candidate = stripFences(argsPart).trim();
+    let parsedArgs = null;
+    if (candidate.startsWith("{") && candidate.endsWith("}")) {
+      try {
+        const obj = JSON.parse(candidate);
+        if (obj && typeof obj === "object" && !Array.isArray(obj)) parsedArgs = obj;
+      } catch {
+        parsedArgs = null;
+      }
+    } else {
+      const endBrace = candidate.lastIndexOf("}");
+      const startBrace = candidate.lastIndexOf("{", endBrace);
+      if (startBrace >= 0 && endBrace > startBrace) {
+        try {
+          const obj = JSON.parse(candidate.slice(startBrace, endBrace + 1));
+          if (obj && typeof obj === "object" && !Array.isArray(obj)) parsedArgs = obj;
+        } catch {
+          parsedArgs = null;
+        }
+      }
+    }
+    if (!parsedArgs) return null;
+
+    return {
+      type: "tool_call",
+      id: crypto.randomUUID(),
+      name,
+      args: parsedArgs,
+      ...(before ? { plan: before } : {}),
+    };
+  }
+
+  const loose = tryParseLooseToolCall(trimmed);
+  if (loose) return { cleaned: "", agent: loose };
+
   return { cleaned: raw, agent: null };
 }
 
