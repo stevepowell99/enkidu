@@ -4,6 +4,7 @@
 const LS_TOKEN_KEY = "enkidu_admin_token";
 const LS_ALLOW_SECRETS_KEY = "enkidu_allow_secrets";
 const LS_USE_WEB_SEARCH_KEY = "enkidu_use_web_search";
+const LS_PREFER_ASYNC_KEY = "enkidu_prefer_async";
 const LS_PAGES_CACHE_KEY = "enkidu_pages_cache_v1";
 const LS_PAGES_CACHE_TS_KEY = "enkidu_pages_cache_ts_v1";
 const LS_API_BASE_KEY = "enkidu_api_base_url";
@@ -453,6 +454,15 @@ function setUseWebSearch(on) {
   sessionStorage.setItem(LS_USE_WEB_SEARCH_KEY, on ? "1" : "0");
 }
 
+function getPreferAsync() {
+  // Purpose: default OFF on each new browser session (do not persist across sessions).
+  return sessionStorage.getItem(LS_PREFER_ASYNC_KEY) === "1";
+}
+
+function setPreferAsync(on) {
+  sessionStorage.setItem(LS_PREFER_ASYNC_KEY, on ? "1" : "0");
+}
+
 function readClipParams() {
   // Purpose: allow a bookmarklet to open Enkidu and auto-create a new page from URL/title/selection.
   // Expected: ?clip=1&clip_id=...&url=...&title=...&text=...
@@ -504,6 +514,24 @@ async function apiFetch(path, { method = "GET", body } = {}) {
   return json;
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForTaskDone(taskId, { pollMs = 2000, maxMs = 15 * 60 * 1000 } = {}) {
+  // Purpose: poll a task page until it reaches done/error (async chat mode).
+  const started = Date.now();
+  for (;;) {
+    const data = await apiFetch(`/api/page?id=${encodeURIComponent(taskId)}`);
+    const page = data?.page || null;
+    const status = String(page?.kv_tags?.task_status || "").trim();
+    if (status === "done") return page;
+    if (status === "error") throw new Error(String(page?.kv_tags?.task_error || "Task failed"));
+    if (Date.now() - started > maxMs) throw new Error("Async task still running (timed out waiting).");
+    await sleep(pollMs);
+  }
+}
+
 // -------------------------
 // Chat in-flight guard
 // -------------------------
@@ -519,6 +547,8 @@ let chatInFlight = false;
 let lastUserActivityAtMs = Date.now();
 let autoBackfillController = null;
 let dreamInFlight = false; // Purpose: avoid overlapping Dream runs (manual button + auto idle trigger).
+let dreamLoopActive = false; // Purpose: allow many short Dream runs without overlapping auto-dream/manual clicks.
+let dreamLoopStopRequested = false;
 function markUserActivity() {
   lastUserActivityAtMs = Date.now();
   // Stop any background backfill as soon as the user interacts again.
@@ -576,7 +606,8 @@ async function refreshEmbeddingStatus() {
     const n = Number(data?.missing_embeddings);
     if (!Number.isFinite(n)) throw new Error("Bad embeddings-status response");
     // Drain backlog only when idle (pause as soon as the user interacts).
-    if (n > 0 && !chatInFlight) {
+    // IMPORTANT: don't run backfill while Dream is running (they compete for API/LLM time and cause noisy failures).
+    if (n > 0 && !chatInFlight && !dreamInFlight && !dreamLoopActive) {
       const now = Date.now();
       if (!window.__enkiduLastAutoBackfillAtMs) window.__enkiduLastAutoBackfillAtMs = 0;
       const idleMs = now - lastUserActivityAtMs;
@@ -588,7 +619,7 @@ async function refreshEmbeddingStatus() {
 
     // Auto-dream: when you're idle AND embeddings are up-to-date, run a Dream pass periodically.
     // Purpose: Dreaming shouldn't require a button press, and it should naturally include the background embedding generation work.
-    if (n <= 0 && !chatInFlight && !dreamInFlight) {
+    if (n <= 0 && !chatInFlight && !dreamInFlight && !dreamLoopActive) {
       const now = Date.now();
       if (!window.__enkiduLastAutoDreamAtMs) window.__enkiduLastAutoDreamAtMs = 0;
       const idleMs = now - lastUserActivityAtMs;
@@ -2120,13 +2151,14 @@ async function sendChat() {
 
   const model = $("chatModel").value || null;
   const use_web_search = !!$("useWebSearch")?.checked;
+  const prefer_async = !!$("preferAsync")?.checked;
   const context_page_ids = Array.from(selectedPayloadIds);
   let data;
   setChatInFlight(true);
   try {
     data = await apiFetch("/api/chat", {
       method: "POST",
-      body: { message: msg, thread_id: threadId || null, model, context_page_ids, use_web_search },
+      body: { message: msg, thread_id: threadId || null, model, context_page_ids, use_web_search, prefer_async },
     });
   } catch (e) {
     // Purpose: if send fails, remove the optimistic bubble so the log matches reality.
@@ -2134,6 +2166,24 @@ async function sendChat() {
     throw e;
   } finally {
     setChatInFlight(false);
+  }
+
+  // Async mode: the server queued a task; start it and poll until done, then refresh the thread.
+  if (data?.status === "queued" && data?.task_id) {
+    setStatus("Queued (async). Waiting for result...", "secondary");
+    // Start the background task immediately (it returns 202 quickly on Netlify).
+    apiFetch("/api/run-task-background", {
+      method: "POST",
+      body: { task_id: data.task_id },
+    }).catch(() => {});
+
+    await waitForTaskDone(String(data.task_id), { pollMs: 2000, maxMs: 15 * 60 * 1000 });
+
+    await loadThreads(data.thread_id);
+    await reloadThread();
+    await recallSearch();
+    setStatus("Replied.", "success");
+    return;
   }
 
   // If the assistant created split pages, backfill embeddings in a separate call
@@ -2186,9 +2236,11 @@ function init() {
   setSelectedPage(null, { newMode: false });
   if ($("allowSecrets")) $("allowSecrets").checked = getAllowSecrets();
   if ($("useWebSearch")) $("useWebSearch").checked = getUseWebSearch();
+  if ($("preferAsync")) $("preferAsync").checked = getPreferAsync();
   dbg("init", {
     allowSecrets: getAllowSecrets(),
     useWebSearch: getUseWebSearch(),
+    preferAsync: getPreferAsync(),
     matchers: getRelatedMatchers(),
   });
 
@@ -2199,6 +2251,8 @@ function init() {
     loadThreads().catch(() => {});
     ensureRecentPagesCache().catch(() => {});
   };
+
+  $("preferAsync")?.addEventListener("change", () => setPreferAsync(!!$("preferAsync")?.checked));
   $("saveApiBase")?.addEventListener("click", () => {
     setApiBaseUrl(($("apiBaseUrl")?.value || "").trim());
     setStatus("API base saved. Reloading models/threads...", "success");
@@ -2509,6 +2563,10 @@ function init() {
     recallSearch().catch(() => {});
   };
   $("runDream").onclick = () => runDream().catch((e) => setStatus(e.message, "danger"));
+  $("runDreamLoop")?.addEventListener("click", () => runDreamLoop().catch((e) => setStatus(e.message, "danger")));
+  $("stopDreamLoop")?.addEventListener("click", () => {
+    dreamLoopStopRequested = true;
+  });
 
   $("adminToken").addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
@@ -2633,6 +2691,47 @@ async function runDream() {
     setStatus(msg, "success");
   } finally {
     dreamInFlight = false;
+  }
+}
+
+function sleepMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function runDreamLoop() {
+  // Purpose: let Dream run for a long time as many short /api/dream calls.
+  if (dreamLoopActive) return;
+  dreamLoopActive = true;
+  dreamLoopStopRequested = false;
+
+  const stopBtn = $("stopDreamLoop");
+  const loopBtn = $("runDreamLoop");
+  if (stopBtn) stopBtn.classList.remove("d-none");
+  if (loopBtn) loopBtn.classList.add("d-none");
+
+  try {
+    const runsRaw = Number(($("dreamRuns")?.value || "").trim());
+    const runs = Number.isFinite(runsRaw) ? Math.max(1, Math.min(500, Math.floor(runsRaw))) : 12;
+    let failures = 0;
+    for (let i = 0; i < runs; i++) {
+      if (dreamLoopStopRequested) break;
+      setStatus(`Dream loop: run ${i + 1}/${runs}...`, "secondary");
+      try {
+        await runDream();
+      } catch (e) {
+        failures++;
+        setStatus(`Dream loop error on run ${i + 1}/${runs}: ${String(e?.message || e)}`, "danger");
+        // Keep going: Gemini can error transiently; user can stop the loop if needed.
+      }
+      if (i < runs - 1 && !dreamLoopStopRequested) await sleepMs(750);
+    }
+    const msg = dreamLoopStopRequested ? "Dream loop stopped." : "Dream loop finished.";
+    setStatus(failures ? `${msg} (failures: ${failures})` : msg, failures ? "warning" : "success");
+  } finally {
+    dreamLoopActive = false;
+    dreamLoopStopRequested = false;
+    if (stopBtn) stopBtn.classList.add("d-none");
+    if (loopBtn) loopBtn.classList.remove("d-none");
   }
 }
 

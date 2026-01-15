@@ -26,7 +26,7 @@ function normalizeModelName(model) {
   return m.startsWith("models/") ? m.slice("models/".length) : m;
 }
 
-async function geminiGenerate({ system, messages, model, tools } = {}) {
+async function geminiGenerate({ system, messages, model, tools, timeoutMs } = {}) {
   const cfg = getGeminiConfig();
   const apiKey = cfg.apiKey;
   const modelName = normalizeModelName(model || cfg.model);
@@ -48,9 +48,10 @@ async function geminiGenerate({ system, messages, model, tools } = {}) {
     ...(Array.isArray(tools) && tools.length ? { tools } : {}),
   };
 
-  const timeoutMs = Number(process.env.ENKIDU_HTTP_TIMEOUT_MS || 20000);
+  const tMsRaw = timeoutMs != null ? Number(timeoutMs) : Number(process.env.ENKIDU_HTTP_TIMEOUT_MS || 20000);
+  const tMs = Number.isFinite(tMsRaw) && tMsRaw > 0 ? Math.floor(tMsRaw) : 20000;
   const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(), timeoutMs);
+  const t = setTimeout(() => controller.abort(), tMs);
 
   let res;
   try {
@@ -63,7 +64,7 @@ async function geminiGenerate({ system, messages, model, tools } = {}) {
   } catch (err) {
     const msg = String(err?.message || err);
     if (msg.toLowerCase().includes("aborted")) {
-      throw new Error(`Gemini generate timed out after ${timeoutMs}ms (model=${modelName})`);
+      throw new Error(`Gemini generate timed out after ${tMs}ms (model=${modelName})`);
     }
     throw err;
   } finally {
@@ -81,7 +82,7 @@ async function geminiGenerate({ system, messages, model, tools } = {}) {
   return text;
 }
 
-async function geminiEmbed({ text, model, taskType = "RETRIEVAL_DOCUMENT" }) {
+async function geminiEmbed({ text, model, taskType = "RETRIEVAL_DOCUMENT", timeoutMs } = {}) {
   // Purpose: server-side embeddings for storing in pgvector.
   const cfg = getGeminiConfig();
   const apiKey = cfg.apiKey;
@@ -97,9 +98,10 @@ async function geminiEmbed({ text, model, taskType = "RETRIEVAL_DOCUMENT" }) {
     taskType,
   };
 
-  const timeoutMs = Number(process.env.ENKIDU_HTTP_TIMEOUT_MS || 20000);
+  const tMsRaw = timeoutMs != null ? Number(timeoutMs) : Number(process.env.ENKIDU_HTTP_TIMEOUT_MS || 20000);
+  const tMs = Number.isFinite(tMsRaw) && tMsRaw > 0 ? Math.floor(tMsRaw) : 20000;
   const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(), timeoutMs);
+  const t = setTimeout(() => controller.abort(), tMs);
 
   let res;
   try {
@@ -112,7 +114,7 @@ async function geminiEmbed({ text, model, taskType = "RETRIEVAL_DOCUMENT" }) {
   } catch (err) {
     const msg = String(err?.message || err);
     if (msg.toLowerCase().includes("aborted")) {
-      throw new Error(`Gemini embed timed out after ${timeoutMs}ms (model=${modelName})`);
+      throw new Error(`Gemini embed timed out after ${tMs}ms (model=${modelName})`);
     }
     throw err;
   } finally {
@@ -132,7 +134,7 @@ async function geminiEmbed({ text, model, taskType = "RETRIEVAL_DOCUMENT" }) {
   return { model: modelName, values };
 }
 
-async function geminiBatchEmbed({ texts, model, taskType = "RETRIEVAL_DOCUMENT" }) {
+async function geminiBatchEmbed({ texts, model, taskType = "RETRIEVAL_DOCUMENT", timeoutMs } = {}) {
   // Purpose: batch embeddings to avoid per-page API calls (important for multi-page writes).
   const cfg = getGeminiConfig();
   const apiKey = cfg.apiKey;
@@ -154,9 +156,10 @@ async function geminiBatchEmbed({ texts, model, taskType = "RETRIEVAL_DOCUMENT" 
     })),
   };
 
-  const timeoutMs = Number(process.env.ENKIDU_HTTP_TIMEOUT_MS || 20000);
+  const tMsRaw = timeoutMs != null ? Number(timeoutMs) : Number(process.env.ENKIDU_HTTP_TIMEOUT_MS || 20000);
+  const tMs = Number.isFinite(tMsRaw) && tMsRaw > 0 ? Math.floor(tMsRaw) : 20000;
   const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(), timeoutMs);
+  const t = setTimeout(() => controller.abort(), tMs);
 
   let res;
   try {
@@ -169,7 +172,7 @@ async function geminiBatchEmbed({ texts, model, taskType = "RETRIEVAL_DOCUMENT" 
   } catch (err) {
     const msg = String(err?.message || err);
     if (msg.toLowerCase().includes("aborted")) {
-      throw new Error(`Gemini batch embed timed out after ${timeoutMs}ms (model=${modelName})`);
+      throw new Error(`Gemini batch embed timed out after ${tMs}ms (model=${modelName})`);
     }
     throw err;
   } finally {

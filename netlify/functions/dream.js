@@ -18,30 +18,90 @@ function json(statusCode, obj) {
 }
 
 async function loadCandidates(limit) {
-  // Small window of recent pages. The Dream prompt decides what to change.
+  // Pick seeds from ALL pages with a strong recency bias.
+  // Purpose: avoid repeatedly dreaming on the exact same most-recent pages, while still occasionally reaching older pages.
   // Avoid editing prompt cards and dream diaries.
-  const rows = await supabaseRequest("pages", {
-    query:
-      "?select=id,title,tags,kv_tags,content_md,created_at" +
-      "&order=created_at.desc" +
-      `&limit=${encodeURIComponent(Math.max(50, limit * 20))}`,
-  });
 
-  const out = [];
-  for (const r of rows || []) {
-    const tags = r?.tags || [];
-    const isPromptCard =
-      tags.includes("*dream-prompt") ||
-      tags.includes("*split-prompt") ||
-      tags.includes("*system") ||
-      tags.includes("*preference");
-    const isDreamDiary = tags.includes("*dream-diary");
-    if (isPromptCard || isDreamDiary) continue;
-
-    out.push(r);
-    if (out.length >= limit) break;
+  function isExcluded(tags) {
+    const t = Array.isArray(tags) ? tags : [];
+    return (
+      t.includes("*dream-prompt") ||
+      t.includes("*split-prompt") ||
+      t.includes("*system") ||
+      t.includes("*preference") ||
+      t.includes("*dream-diary")
+    );
   }
-  return out;
+
+  function drawRecencyBiasedOffset({ decay = 0.995, maxOffset = 500000 } = {}) {
+    // Distribution: P(offset=k) ~ (1-decay) * decay^k (geometric-like), so small offsets dominate but long tail exists.
+    const d = Number(decay);
+    const max = Math.max(0, Math.floor(Number(maxOffset) || 0));
+    if (!Number.isFinite(d) || d <= 0 || d >= 1 || max <= 0) return 0;
+    const u = Math.random();
+    const k = Math.floor(Math.log(1 - u) / Math.log(d)); // >=0
+    if (!Number.isFinite(k) || k < 0) return 0;
+    return Math.min(max, k);
+  }
+
+  async function fetchOneAtOffset(offset) {
+    const off = Math.max(0, Math.floor(Number(offset) || 0));
+    const rows = await supabaseRequest("pages", {
+      query:
+        "?select=id,title,tags,kv_tags,created_at" +
+        "&order=created_at.desc" +
+        `&limit=1&offset=${encodeURIComponent(off)}`,
+    });
+    return rows?.[0] || null;
+  }
+
+  const want = Math.max(1, Math.floor(Number(limit) || 8));
+  const seen = new Set();
+  const pickedIds = [];
+  const decay = Number(process.env.ENKIDU_DREAM_SEED_DECAY || 0.995);
+  const maxOffset = Number(process.env.ENKIDU_DREAM_SEED_MAX_OFFSET || 500000);
+  const maxTries = Math.max(50, want * 30);
+
+  for (let tries = 0; tries < maxTries && pickedIds.length < want; tries++) {
+    const off = drawRecencyBiasedOffset({ decay, maxOffset });
+    const one = await fetchOneAtOffset(off);
+    const id = String(one?.id || "").trim();
+    if (!id) continue;
+    if (seen.has(id)) continue;
+    if (isExcluded(one?.tags)) continue;
+    seen.add(id);
+    pickedIds.push(id);
+  }
+
+  // Fallback: if sampling didn't find enough (e.g. many excluded pages), take a small recent window.
+  if (pickedIds.length < want) {
+    const rows = await supabaseRequest("pages", {
+      query:
+        "?select=id,tags" +
+        "&order=created_at.desc" +
+        `&limit=${encodeURIComponent(Math.min(5000, Math.max(200, want * 200)))}`,
+    });
+    for (const r of rows || []) {
+      const id = String(r?.id || "").trim();
+      if (!id) continue;
+      if (seen.has(id)) continue;
+      if (isExcluded(r?.tags)) continue;
+      seen.add(id);
+      pickedIds.push(id);
+      if (pickedIds.length >= want) break;
+    }
+  }
+
+  // Load full rows for the picked ids (single request), and preserve picked order.
+  const inList = pickedIds.map((s) => encodeURIComponent(s)).join(",");
+  const full = await supabaseRequest("pages", {
+    query:
+      `?select=id,title,tags,kv_tags,content_md,created_at` +
+      `&id=in.(${inList})` +
+      `&limit=${encodeURIComponent(pickedIds.length)}`,
+  });
+  const byId = new Map((full || []).map((p) => [String(p.id), p]));
+  return pickedIds.map((id) => byId.get(id)).filter(Boolean);
 }
 
 async function loadDreamPrompt() {
@@ -161,6 +221,11 @@ function agentProtocolText() {
     "  Start from the provided Seed page ids; use get_page(id) to read, then update_page(id, patch) to improve.\n" +
     "- You should try to make at least ONE meaningful write (update_page/create_page/delete_page).\n" +
     '  If you make zero writes, your final diary MUST explain why (e.g. "no safe changes found").\n' +
+    "- Your final text will be saved as the top of a *dream-diary page. Include a short narrative:\n" +
+    "  - What I tried\n" +
+    "  - What I changed (high level)\n" +
+    "  - What didn’t work / what blocked me\n" +
+    "  - Next time (1–3 concrete ideas)\n" +
     "- If you will call a tool, include your short plan in tool_call.plan.\n" +
     "- If you call a tool, wait for the tool result before proceeding.\n\n" +
     toolManifestShortText({ allowWebSearch: false })
@@ -264,7 +329,8 @@ exports.handler = async (event) => {
         text:
           "Seed pages (recent, but you may wander anywhere):\n\n" +
           seedPagesText +
-          "\n\nStart from these ids. Pick ONE seed page, read it with get_page, then do at least one concrete improvement via update_page (or delete_page if truly redundant). Avoid repeated search_pages.",
+          "\n\nStart from these ids. Pick ONE seed page, read it with get_page, then do at least one concrete improvement via update_page (or delete_page if truly redundant). Avoid repeated search_pages.\n" +
+          "\nWhen you finish, write a short narrative diary in your final text (what you tried, what changed, what blocked you, next time).",
       },
     ];
 
@@ -275,10 +341,23 @@ exports.handler = async (event) => {
     const createdIds = new Set();
     const visitedIds = new Set(candidates.map((p) => String(p.id)));
     const toolCalls = []; // { name, ok, error? } (for diary/debugging)
+    let searchPagesCalls = 0; // enforce "no search_pages loops"
 
     // Keep it small: background dreaming should be cheap.
     for (let iter = 0; iter < 8; iter++) {
-      const raw = await geminiGenerate({ system: agentSystem, messages, model });
+      const dreamTimeoutMs = Number(process.env.ENKIDU_DREAM_TIMEOUT_MS || 60000);
+      let raw = "";
+      try {
+        raw = await geminiGenerate({ system: agentSystem, messages, model, timeoutMs: dreamTimeoutMs });
+      } catch (e) {
+        // Purpose: Gemini sometimes throws transient INTERNAL errors; still write a diary page instead of returning 500.
+        finalText =
+          "Dream diary (narrative):\n" +
+          `- What I tried: continue Dream run.\n` +
+          `- What happened: Gemini error: ${String(e?.message || e)}\n` +
+          `- Next time: rerun Dream; consider a different model.\n`;
+        break;
+      }
       const { agent } = extractEnkiduAgentEnvelope(raw);
 
       // If the model didn't comply, stop and record the raw text (helps you debug prompt issues).
@@ -298,6 +377,12 @@ exports.handler = async (event) => {
         let result;
         let ok = true;
         try {
+          if (name === "search_pages") {
+            searchPagesCalls++;
+            if (searchPagesCalls > 1) {
+              throw new Error("Dream rule: search_pages is allowed at most once per run. Use get_page/related_* instead.");
+            }
+          }
           result = await executeTool(name, args, { allowSecrets, allowWebSearch: false });
         } catch (e) {
           ok = false;
@@ -338,6 +423,25 @@ exports.handler = async (event) => {
 
     const updated = updatedIds.size; // For backwards-compatible UI messaging (counts update_page calls).
 
+    // Ensure we always have some narrative at the top of the diary, even if the model never produced type=final.
+    if (!String(finalText || "").trim()) {
+      const counts = {};
+      for (const t of toolCalls) counts[t.name] = (counts[t.name] || 0) + 1;
+      const topTools = Object.entries(counts)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 6)
+        .map(([k, v]) => `- ${k}: ${v}`)
+        .join("\n");
+      finalText =
+        "Dream diary (narrative):\n" +
+        `- What I tried: review the seed pages and look for one concrete improvement.\n` +
+        `- What I changed: ${updatedIds.size || deletedIds.size || createdIds.size ? "see lists below" : "no writes this run"}.\n` +
+        `- What blocked me: I did not produce a final narrative within the step budget.\n` +
+        `- Next time: focus on one page; read it with get_page; then do a small update_page.\n\n` +
+        "Tool usage summary:\n" +
+        (topTools || "(none)");
+    }
+
     const diaryTitle = `Dream diary (${new Date().toLocaleString()})`;
     const toolCallsSummary = toolCalls.length
       ? `Tool calls (${toolCalls.length}):\n` +
@@ -362,7 +466,8 @@ exports.handler = async (event) => {
       Array.from(visitedIds).slice(0, 40).map((id) => `- ${id}`).join("\n");
 
     assertNoSecrets(diaryContent, { allow: allowSecrets });
-    const embed = await makeEmbeddingFields({ content_md: diaryContent });
+    const dreamTimeoutMs = Number(process.env.ENKIDU_DREAM_TIMEOUT_MS || 60000);
+    const embed = await makeEmbeddingFields({ content_md: diaryContent, timeoutMs: dreamTimeoutMs });
     const diaryRows = await supabaseRequest("pages", {
       method: "POST",
       query: "?select=id",

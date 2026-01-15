@@ -15,6 +15,12 @@ const { toolManifestShortText, executeTool } = require("./_agent_tools");
 // -------------------------
 // Purpose: store one growing page per thread_id, and parse it client-side into bubbles.
 const THREAD_FORMAT_V1 = "transcript_v1";
+const TASK_STATUS = {
+  queued: "queued",
+  running: "running",
+  done: "done",
+  error: "error",
+};
 
 function makeTranscriptTurn({ role, atIso, text } = {}) {
   // Purpose: append-only, parseable block format.
@@ -569,6 +575,256 @@ function compactToolResult(toolName, result) {
   return out;
 }
 
+async function createAsyncTaskPage({
+  threadId,
+  message,
+  model,
+  contextPageIds,
+  useWebSearch,
+  allowSecrets,
+} = {}) {
+  // Purpose: store a queued async task in the existing `pages` table (no migrations).
+  // Note: we store the original message in kv_tags so the task page content_md can later be replaced by the reply.
+  assertNoSecrets(String(message || ""), { allow: allowSecrets });
+
+  const kv = {
+    task_type: "chat_async_v1",
+    task_status: TASK_STATUS.queued,
+    task_message: String(message || ""),
+    task_model: model ? String(model) : null,
+    task_context_page_ids: Array.isArray(contextPageIds) ? contextPageIds.map(String) : [],
+    task_use_web_search: useWebSearch === true,
+    task_created_at: new Date().toISOString(),
+  };
+
+  const title = String(message || "").trim().split(/\r?\n/g)[0].replace(/\s+/g, " ").slice(0, 80);
+
+  const rows = await supabaseRequest("pages", {
+    method: "POST",
+    query: "?select=id,thread_id,kv_tags",
+    body: {
+      thread_id: threadId,
+      title: title ? `Task: ${title}` : "Task",
+      content_md: String(message || ""), // initial content (useful if you open the task in Recall)
+      tags: ["*task"],
+      kv_tags: kv,
+      next_page_id: null,
+    },
+  });
+  return rows?.[0] || null;
+}
+
+async function runTranscriptChatTask({
+  // Either pass a taskPage (from run-task-background), or pass explicit fields (from /api/chat).
+  taskPage,
+  message,
+  threadId,
+  model,
+  contextPageIds,
+  useWebSearch,
+  allowSecrets,
+  allowWebSearch,
+} = {}) {
+  // Purpose: shared transcript-mode chat runner used by both synchronous /api/chat and async background tasks.
+  const msg =
+    taskPage && taskPage.kv_tags && typeof taskPage.kv_tags === "object" && typeof taskPage.kv_tags.task_message === "string"
+      ? String(taskPage.kv_tags.task_message || "")
+      : String(message || taskPage?.content_md || "");
+  const tid = String(threadId || taskPage?.thread_id || "").trim();
+  if (!tid) throw new Error("threadId is required");
+  if (!msg.trim()) throw new Error("message is required");
+
+  const useWS =
+    allowWebSearch === true || useWebSearch === true || (taskPage?.kv_tags && taskPage.kv_tags.task_use_web_search === true);
+  const ctxIds =
+    Array.isArray(contextPageIds) && contextPageIds.length
+      ? contextPageIds
+      : Array.isArray(taskPage?.kv_tags?.task_context_page_ids)
+        ? taskPage.kv_tags.task_context_page_ids
+        : [];
+  const mdl =
+    model != null
+      ? String(model || "")
+      : typeof taskPage?.kv_tags?.task_model === "string"
+        ? taskPage.kv_tags.task_model
+        : taskPage?.kv_tags?.task_model == null
+          ? null
+          : String(taskPage.kv_tags.task_model);
+
+  // Dual-mode: if a transcript page exists, use it; otherwise create one.
+  let transcriptPage = await findTranscriptThreadPage(tid);
+  if (!transcriptPage) {
+    const fallbackThreadTitle = String(msg || "").trim().split(/\r?\n/g)[0].replace(/\s+/g, " ").slice(0, 80);
+    transcriptPage = await createTranscriptThreadPage({ threadId: tid, threadTitle: fallbackThreadTitle || "" });
+  }
+
+  // Build prompt context: base pages + recent transcript turns.
+  const systemPrompt = await loadSystemPromptText();
+  const prefsText = await loadPreferenceBasePagesText();
+  const contextPages = await loadContextPages(ctxIds);
+
+  const promptMaxPerMsgChars = Number(process.env.ENKIDU_PROMPT_MAX_CHARS_PER_MSG || 12000);
+  const promptMaxContextPageChars = Number(process.env.ENKIDU_PROMPT_MAX_CHARS_PER_CONTEXT_PAGE || 12000);
+  const promptMaxSystemChars = Number(process.env.ENKIDU_PROMPT_MAX_CHARS_SYSTEM || 20000);
+  const promptMaxPrefsChars = Number(process.env.ENKIDU_PROMPT_MAX_CHARS_PREFS || 20000);
+
+  const systemPromptForPrompt = truncateForPrompt(systemPrompt, { maxChars: promptMaxSystemChars, label: "*system" });
+  const prefsTextForPrompt = truncateForPrompt(prefsText, { maxChars: promptMaxPrefsChars, label: "preference base pages" });
+
+  const historyTurns = parseTranscriptTurnsV1(transcriptPage?.content_md || "");
+  const historyForPrompt = historyTurns
+    .filter((t) => t.role === "user" || t.role === "assistant")
+    .slice(-12)
+    .map((t) => ({
+      role: t.role === "assistant" ? "model" : "user",
+      text: truncateForPrompt(String(t.text || ""), { maxChars: promptMaxPerMsgChars, label: "history message" }),
+    }));
+
+  // Selected context pages (kept as separate user message).
+  const extraMessages = [];
+  if (contextPages.length) {
+    const ctx = contextPages
+      .map((p) => {
+        const t = p.title ? `Title: ${p.title}\n` : "";
+        const content = truncateForPrompt(String(p.content_md || ""), {
+          maxChars: promptMaxContextPageChars,
+          label: "context page",
+        });
+        return `---\n${t}${content}`;
+      })
+      .join("\n\n");
+    extraMessages.push({ role: "user", text: `Selected context pages:\n${ctx}` });
+  }
+
+  // Append the user turn immediately (so history is durable even if Gemini errors).
+  const userTurn = makeTranscriptTurn({ role: "user", atIso: new Date().toISOString(), text: msg });
+  transcriptPage = await appendToTranscriptPage({
+    pageId: transcriptPage.id,
+    prevContentMd: transcriptPage.content_md,
+    extraMd: userTurn,
+  });
+
+  // Agent system instruction (unchanged protocol).
+  const agentSystem = [String(systemPromptForPrompt || "").trim(), String(prefsTextForPrompt || "").trim(), agentProtocolText({ allowWebSearch: useWS })]
+    .filter(Boolean)
+    .join("\n\n");
+  const messages = [...historyForPrompt, ...extraMessages, { role: "user", text: msg }];
+
+  let finalText = "";
+  let lastToolResultText = "";
+  let finalMeta = null;
+  let createdPages = [];
+
+  // Keep small by default (same as sync path). Background can raise ENKIDU_HTTP_TIMEOUT_MS.
+  for (let iter = 0; iter < 4; iter++) {
+    const raw = await geminiGenerate({ system: agentSystem, messages, model: mdl || null });
+    const { agent } = extractEnkiduAgentEnvelope(raw);
+
+    // If the model didn't comply, treat as a final answer.
+    if (!agent || typeof agent !== "object") {
+      finalText = String(raw || "");
+      break;
+    }
+
+    const type = String(agent.type || "").trim();
+
+    if (type === "plan") {
+      const text = String(agent.text || "").trim();
+      if (text) messages.push({ role: "model", text });
+      continue;
+    }
+
+    if (type === "tool_call") {
+      const name = String(agent.name || "").trim();
+      const args = agent.args && typeof agent.args === "object" && !Array.isArray(agent.args) ? agent.args : {};
+      if (!name) throw new Error("Agent tool_call.name is required");
+
+      const planText = typeof agent.plan === "string" ? agent.plan.trim() : "";
+      if (planText) messages.push({ role: "model", text: planText });
+
+      const callText =
+        `Tool call: ${name}\n\n` +
+        "Args:\n" +
+        "```json\n" +
+        JSON.stringify(args, null, 2) +
+        "\n```";
+      messages.push({ role: "model", text: callText });
+
+      let result;
+      let ok = true;
+      try {
+        result = await executeTool(name, args, { allowSecrets, allowWebSearch: useWS });
+      } catch (e) {
+        ok = false;
+        result = { error: String(e?.message || e) };
+      }
+      const compact = compactToolResult(name, result);
+      const resultText =
+        `Tool result: ${name} (${ok ? "ok" : "error"})\n\n` +
+        "```json\n" +
+        JSON.stringify(compact, null, 2) +
+        "\n```";
+      lastToolResultText = resultText;
+      messages.push({ role: "user", text: resultText });
+      continue;
+    }
+
+    if (type === "final") {
+      finalText = String(agent.text || "");
+      break;
+    }
+
+    throw new Error(`Unknown agent.type: ${type}`);
+  }
+
+  if (!String(finalText || "").trim() && String(lastToolResultText || "").trim()) {
+    finalText = lastToolResultText;
+  }
+
+  // If the model returned an agent envelope as raw text, unwrap it.
+  const reparsed = extractEnkiduAgentEnvelope(finalText);
+  if (reparsed?.agent && typeof reparsed.agent === "object") {
+    const t = String(reparsed.agent.type || "").trim();
+    if (t === "final" && typeof reparsed.agent.text === "string") {
+      finalText = reparsed.agent.text;
+    }
+  }
+
+  const { cleaned: cleanedFinal, meta } = extractEnkiduMeta(finalText);
+  finalMeta = meta || null;
+  let reply = String(cleanedFinal || "");
+  if (!reply.trim()) reply = "(empty reply)";
+
+  createdPages = finalMeta ? await createPagesFromMeta(finalMeta, { allowSecrets }) : [];
+
+  // Update thread title if suggested (stored on the transcript page kv_tags).
+  const suggestedThreadTitle =
+    typeof finalMeta?.suggested_thread_title === "string" ? finalMeta.suggested_thread_title.trim() : "";
+  const nextKv =
+    transcriptPage?.kv_tags && typeof transcriptPage.kv_tags === "object" ? { ...transcriptPage.kv_tags } : {};
+  if (suggestedThreadTitle) nextKv.thread_title = suggestedThreadTitle;
+
+  // Append assistant reply to transcript page.
+  assertNoSecrets(reply, { allow: allowSecrets });
+  const assistantTurn = makeTranscriptTurn({ role: "assistant", atIso: new Date().toISOString(), text: reply });
+  transcriptPage = await appendToTranscriptPage({
+    pageId: transcriptPage.id,
+    prevContentMd: transcriptPage.content_md,
+    extraMd: assistantTurn,
+    kvPatch: nextKv,
+  });
+
+  return {
+    thread_id: tid,
+    reply,
+    meta: finalMeta,
+    created_pages: Array.from(new Set((createdPages || []).map((p) => p.id).filter(Boolean))),
+  };
+}
+
+// Re-export for background worker reuse (avoid duplicated logic).
+exports.runTranscriptChatTask = runTranscriptChatTask;
+
 exports.handler = async (event, context) => {
   // Netlify dev (lambda-local) can hang until timeout if the event loop has open handles
   // (e.g., keep-alive sockets from fetch/undici). This matches AWS Lambda best practice.
@@ -580,11 +836,15 @@ exports.handler = async (event, context) => {
     ["1", "true", "yes"].includes(String(process.env.NETLIFY_DEV || "").trim().toLowerCase()) ||
     ["1", "true", "yes"].includes(String(process.env.NETLIFY_LOCAL || "").trim().toLowerCase());
   // Purpose: lambda-local has a hard 30s wall; keep enough budget for multiple sequential calls.
-  // NOTE: 12s was too aggressive in practice (Gemini frequently takes longer even for simple prompts).
-  // Keep this below the ~30s lambda-local wall, but give Gemini a fair chance to respond.
-  const maxUpstreamMs = isNetlifyDev ? 25000 : 25000;
-  const clampedTimeout = Math.min(Number.isFinite(existingTimeout) ? existingTimeout : 20000, maxUpstreamMs);
-  process.env.ENKIDU_HTTP_TIMEOUT_MS = String(clampedTimeout);
+  // IMPORTANT: only clamp in Netlify dev. Otherwise this leaks into other endpoints (e.g. /api/dream)
+  // because we're mutating process.env (shared across requests).
+  if (isNetlifyDev) {
+    // NOTE: 12s was too aggressive in practice (Gemini frequently takes longer even for simple prompts).
+    // Keep this below the ~30s lambda-local wall, but give Gemini a fair chance to respond.
+    const maxUpstreamMs = 25000;
+    const clampedTimeout = Math.min(Number.isFinite(existingTimeout) ? existingTimeout : 20000, maxUpstreamMs);
+    process.env.ENKIDU_HTTP_TIMEOUT_MS = String(clampedTimeout);
+  }
   // Netlify dev (lambda-local) has a hard 30s wall-clock timeout for the whole function.
   // Keep chat usable by avoiding multi-round Gemini loops when tools are involved.
   const startedAtMs = Date.now();
@@ -624,6 +884,7 @@ exports.handler = async (event, context) => {
     const model = body.model ? String(body.model) : null;
     const contextPageIds = body.context_page_ids || [];
     const useWebSearch = body.use_web_search === true;
+    const preferAsync = body.prefer_async === true;
 
     if (!message.trim()) return json(400, { error: "message is required" });
     assertNoSecrets(message, { allow: allowSecrets });
@@ -636,206 +897,42 @@ exports.handler = async (event, context) => {
     // Dual-mode: if a transcript page exists, use it; otherwise fall back to legacy behavior.
     // New threads always start in transcript mode.
     let transcriptPage = await findTranscriptThreadPage(threadId);
-    if (isNewThread || transcriptPage) {
-      // Create transcript page if needed.
-      if (!transcriptPage) {
-        const fallbackThreadTitle = String(message || "")
-          .trim()
-          .split(/\r?\n/g)[0]
-          .replace(/\s+/g, " ")
-          .slice(0, 80);
-        transcriptPage = await createTranscriptThreadPage({
-          threadId,
-          threadTitle: fallbackThreadTitle || "",
-        });
-      }
+    const canUseTranscript = isNewThread || !!transcriptPage;
 
-      // Build prompt context: base pages + recent transcript turns.
-      const tCtx = t0();
-      const systemPrompt = await loadSystemPromptText();
-      const prefsText = await loadPreferenceBasePagesText();
-      logTiming("loadChatContext", tCtx);
-      const contextPages = await loadContextPages(contextPageIds);
-
-      const promptMaxPerMsgChars = Number(process.env.ENKIDU_PROMPT_MAX_CHARS_PER_MSG || 12000);
-      const promptMaxContextPageChars = Number(process.env.ENKIDU_PROMPT_MAX_CHARS_PER_CONTEXT_PAGE || 12000);
-      const promptMaxSystemChars = Number(process.env.ENKIDU_PROMPT_MAX_CHARS_SYSTEM || 20000);
-      const promptMaxPrefsChars = Number(process.env.ENKIDU_PROMPT_MAX_CHARS_PREFS || 20000);
-
-      const systemPromptForPrompt = truncateForPrompt(systemPrompt, { maxChars: promptMaxSystemChars, label: "*system" });
-      const prefsTextForPrompt = truncateForPrompt(prefsText, { maxChars: promptMaxPrefsChars, label: "preference base pages" });
-
-      const historyTurns = parseTranscriptTurnsV1(transcriptPage?.content_md || "");
-      const historyForPrompt = historyTurns
-        .filter((t) => t.role === "user" || t.role === "assistant")
-        .slice(-12)
-        .map((t) => ({
-          role: t.role === "assistant" ? "model" : "user",
-          text: truncateForPrompt(String(t.text || ""), { maxChars: promptMaxPerMsgChars, label: "history message" }),
-        }));
-
-      // Selected context pages (kept as separate user message).
-      const extraMessages = [];
-      if (contextPages.length) {
-        const ctx = contextPages
-          .map((p) => {
-            const t = p.title ? `Title: ${p.title}\n` : "";
-            const content = truncateForPrompt(String(p.content_md || ""), {
-              maxChars: promptMaxContextPageChars,
-              label: "context page",
-            });
-            return `---\n${t}${content}`;
-          })
-          .join("\n\n");
-        extraMessages.push({ role: "user", text: `Selected context pages:\n${ctx}` });
-      }
-
-      // Append the user turn immediately (so history is durable even if Gemini errors).
-      const userTurn = makeTranscriptTurn({ role: "user", atIso: new Date().toISOString(), text: message });
-      transcriptPage = await appendToTranscriptPage({
-        pageId: transcriptPage.id,
-        prevContentMd: transcriptPage.content_md,
-        extraMd: userTurn,
+    // Async path: for long tasks, enqueue and let the UI poll.
+    // Keep this ONLY for transcript-mode threads (new threads always are).
+    const modelName = model ? String(model) : "";
+    const slowModelHeuristic = /pro|thinking|reasoning/i.test(modelName);
+    const bigPromptHeuristic = String(message || "").length > 4000 || (Array.isArray(contextPageIds) && contextPageIds.length > 8);
+    const shouldAsync = canUseTranscript && (preferAsync || slowModelHeuristic || bigPromptHeuristic);
+    if (shouldAsync) {
+      const task = await createAsyncTaskPage({
+        threadId,
+        message,
+        model,
+        contextPageIds,
+        useWebSearch,
+        allowSecrets,
       });
-
-      // Agent system instruction (unchanged protocol).
-      const agentSystem = [
-        String(systemPromptForPrompt || "").trim(),
-        String(prefsTextForPrompt || "").trim(),
-        agentProtocolText({ allowWebSearch: useWebSearch }),
-      ]
-        .filter(Boolean)
-        .join("\n\n");
-      const messages = [...historyForPrompt, ...extraMessages, { role: "user", text: message }];
-
-      if (debugPromptSizes) {
-        const sysLen = agentSystem.length;
-        const msgsLen = messages.reduce((sum, m) => sum + String(m?.text || "").length, 0);
-        const approxTokens = Math.ceil((sysLen + msgsLen) / 4); // very rough
-        console.error(
-          `[enkidu] prompt_sizes sysChars=${sysLen} msgsChars=${msgsLen} msgs=${messages.length} approxTokens=${approxTokens}`
-        );
-      }
-
-      let finalText = "";
-      let lastToolResultText = "";
-      let finalMeta = null;
-      let createdPages = [];
-
-      // Keep small to avoid Netlify dev lambda-local 30s timeouts.
-      for (let iter = 0; iter < 4; iter++) {
-        if (isNetlifyDev && Date.now() - startedAtMs > netlifyDevHardBudgetMs) break;
-        const tGem = t0();
-        const raw = await geminiGenerate({ system: agentSystem, messages, model });
-        logTiming("geminiGenerate", tGem);
-        const { agent } = extractEnkiduAgentEnvelope(raw);
-
-        // If the model didn't comply, treat as a final answer.
-        if (!agent || typeof agent !== "object") {
-          finalText = String(raw || "");
-          break;
-        }
-
-        const type = String(agent.type || "").trim();
-
-        if (type === "plan") {
-          const text = String(agent.text || "").trim();
-          if (text) messages.push({ role: "model", text });
-          continue;
-        }
-
-        if (type === "tool_call") {
-          const name = String(agent.name || "").trim();
-          const args = agent.args && typeof agent.args === "object" && !Array.isArray(agent.args) ? agent.args : {};
-          if (!name) throw new Error("Agent tool_call.name is required");
-
-          const planText = typeof agent.plan === "string" ? agent.plan.trim() : "";
-          if (planText) messages.push({ role: "model", text: planText });
-
-          const callText =
-            `Tool call: ${name}\n\n` +
-            "Args:\n" +
-            "```json\n" +
-            JSON.stringify(args, null, 2) +
-            "\n```";
-          messages.push({ role: "model", text: callText });
-
-          let result;
-          let ok = true;
-          try {
-            result = await executeTool(name, args, { allowSecrets, allowWebSearch: useWebSearch });
-          } catch (e) {
-            ok = false;
-            result = { error: String(e?.message || e) };
-          }
-          const compact = compactToolResult(name, result);
-          const resultText =
-            `Tool result: ${name} (${ok ? "ok" : "error"})\n\n` +
-            "```json\n" +
-            JSON.stringify(compact, null, 2) +
-            "\n```";
-          lastToolResultText = resultText;
-          messages.push({ role: "user", text: resultText });
-
-          // Netlify dev (lambda-local) hard time limit: don't do a second Gemini call.
-          if (isNetlifyDev) {
-            finalText = resultText;
-            break;
-          }
-          continue;
-        }
-
-        if (type === "final") {
-          finalText = String(agent.text || "");
-          break;
-        }
-
-        throw new Error(`Unknown agent.type: ${type}`);
-      }
-
-      if (!String(finalText || "").trim() && String(lastToolResultText || "").trim()) {
-        finalText = lastToolResultText;
-      }
-
-      // If the model returned an agent envelope as raw text, unwrap it.
-      const reparsed = extractEnkiduAgentEnvelope(finalText);
-      if (reparsed?.agent && typeof reparsed.agent === "object") {
-        const t = String(reparsed.agent.type || "").trim();
-        if (t === "final" && typeof reparsed.agent.text === "string") {
-          finalText = reparsed.agent.text;
-        }
-      }
-
-      const { cleaned: cleanedFinal, meta } = extractEnkiduMeta(finalText);
-      finalMeta = meta || null;
-      let reply = String(cleanedFinal || "");
-      if (!reply.trim()) reply = "(empty reply)";
-
-      createdPages = finalMeta ? await createPagesFromMeta(finalMeta, { allowSecrets }) : [];
-
-      // Update thread title if suggested (stored on the transcript page kv_tags).
-      const suggestedThreadTitle =
-        typeof finalMeta?.suggested_thread_title === "string" ? finalMeta.suggested_thread_title.trim() : "";
-      const nextKv = transcriptPage?.kv_tags && typeof transcriptPage.kv_tags === "object" ? { ...transcriptPage.kv_tags } : {};
-      if (suggestedThreadTitle) nextKv.thread_title = suggestedThreadTitle;
-
-      // Append assistant reply to transcript page.
-      assertNoSecrets(reply, { allow: allowSecrets });
-      const assistantTurn = makeTranscriptTurn({ role: "assistant", atIso: new Date().toISOString(), text: reply });
-      transcriptPage = await appendToTranscriptPage({
-        pageId: transcriptPage.id,
-        prevContentMd: transcriptPage.content_md,
-        extraMd: assistantTurn,
-        kvPatch: nextKv,
-      });
-
-      return json(200, {
+      return json(202, {
+        status: "queued",
         thread_id: threadId,
-        reply,
-        meta: finalMeta,
-        // Only include split-created pages (not the transcript thread page) to avoid embedding backfill on huge transcripts.
-        created_pages: Array.from(new Set(createdPages.map((p) => p.id).filter(Boolean))),
+        task_id: task?.id || null,
       });
+    }
+
+    if (canUseTranscript) {
+      // Create transcript page if needed.
+      const out = await runTranscriptChatTask({
+        message,
+        threadId,
+        model,
+        contextPageIds,
+        useWebSearch,
+        allowSecrets,
+        allowWebSearch: useWebSearch,
+      });
+      return json(200, out);
     }
 
     // NOTE: intentionally no direct "raw SQL" shortcut in chat.

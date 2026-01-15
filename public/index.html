@@ -72,6 +72,12 @@
                 <span class="badge text-bg-secondary" id="payloadCount" title="Selected recall pages to include in the next chat request">Payload: 0</span>
                 <button id="clearPayload" class="btn btn-sm btn-outline-secondary" type="button">Clear</button>
                 <button id="runDream" class="btn btn-sm btn-outline-secondary" type="button">Dream</button>
+                <div class="input-group input-group-sm" style="width: 14rem" title="Run Dream multiple times (short runs)">
+                  <span class="input-group-text">x</span>
+                  <input id="dreamRuns" class="form-control" type="number" min="1" step="1" value="12" />
+                  <button id="runDreamLoop" class="btn btn-outline-secondary" type="button">Loop</button>
+                  <button id="stopDreamLoop" class="btn btn-outline-danger d-none" type="button">Stop</button>
+                </div>
                 <label class="form-label small mb-0" for="chatModel">Model</label>
                 <select id="chatModel" class="form-select form-select-sm" style="width: 14rem">
                   <option value="">(loading...)</option>
@@ -95,6 +101,12 @@
                 <input class="form-check-input" type="checkbox" role="switch" id="useWebSearch" />
                 <label class="form-check-label small" for="useWebSearch" title="When on, chat requests can use Gemini web_search grounding">
                   Web search
+                </label>
+              </div>
+              <div class="form-check form-switch mt-2">
+                <input class="form-check-input" type="checkbox" role="switch" id="preferAsync" />
+                <label class="form-check-label small" for="preferAsync" title="When on, chat runs in async mode (avoids request timeouts).">
+                  Async
                 </label>
               </div>
               <div class="mt-2 d-flex gap-2">

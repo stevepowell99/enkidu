@@ -192,6 +192,7 @@ const threads = require("../netlify/functions/threads").handler;
 const dream = require("../netlify/functions/dream").handler;
 const backfillEmbeddings = require("../netlify/functions/backfill-embeddings").handler;
 const embeddingsStatus = require("../netlify/functions/embeddings-status").handler;
+const runTaskBackground = require("../netlify/functions/run-task-background").handler;
 
 app.all("/api/chat", (req, res) => runNetlifyHandler(chat, req, res));
 app.all("/api/pages", (req, res) => runNetlifyHandler(pages, req, res));
@@ -202,6 +203,7 @@ app.all("/api/threads", (req, res) => runNetlifyHandler(threads, req, res));
 app.all("/api/dream", (req, res) => runNetlifyHandler(dream, req, res));
 app.all("/api/backfill-embeddings", (req, res) => runNetlifyHandler(backfillEmbeddings, req, res));
 app.all("/api/embeddings-status", (req, res) => runNetlifyHandler(embeddingsStatus, req, res));
+app.all("/api/run-task-background", (req, res) => runNetlifyHandler(runTaskBackground, req, res));
 
 // -------------------------
 // Local dev: serve the UI (same-origin, no CORS)
