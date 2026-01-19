@@ -1,5 +1,7 @@
 // POST /api/chat
-// Purpose: call Gemini, save user+assistant messages as separate pages.
+// Purpose: call Gemini and save chat under a thread_id.
+// - Current default: transcript mode (v1) => one growing page per thread_id.
+// - Legacy threads: previously stored as many pages; we upgrade them to transcript mode on first new message.
 
 const crypto = require("crypto");
 
@@ -96,6 +98,85 @@ async function createTranscriptThreadPage({ threadId, threadTitle }) {
     },
   });
   return rows?.[0] || null;
+}
+
+async function loadAllChatPagesForThread(threadId) {
+  // Purpose: load all legacy chat pages for a thread (paged; PostgREST often caps at ~1000 rows).
+  const tid = String(threadId || "").trim();
+  if (!tid) return [];
+  const tagFilter = encodeURIComponent("{*chat}");
+  const out = [];
+  let offset = 0;
+  const limit = 1000;
+  for (;;) {
+    const rows = await supabaseRequest("pages", {
+      query:
+        `?select=id,content_md,created_at,kv_tags,tags,title` +
+        `&thread_id=eq.${encodeURIComponent(tid)}` +
+        `&tags=cs.${tagFilter}` +
+        `&order=created_at.asc` +
+        `&limit=${limit}` +
+        `&offset=${offset}`,
+    });
+    if (Array.isArray(rows) && rows.length) out.push(...rows);
+    if (!Array.isArray(rows) || rows.length < limit) break;
+    offset += limit;
+  }
+  return out;
+}
+
+async function upgradeLegacyThreadToTranscript({ threadId, seedThreadTitle }) {
+  // Purpose: convert an existing legacy thread (many *chat pages) into a single transcript page.
+  const tid = String(threadId || "").trim();
+  if (!tid) return null;
+
+  const legacyPages = await loadAllChatPagesForThread(tid);
+
+  // No legacy pages yet: create the transcript page now so this thread stops using legacy mode.
+  if (!legacyPages.length) {
+    const tt = String(seedThreadTitle || "").trim();
+    return await createTranscriptThreadPage({ threadId: tid, threadTitle: tt || "" });
+  }
+
+  // Pick a reasonable title from the first user turn (fallback to seed title).
+  const firstUser = legacyPages.find((p) => String(p?.kv_tags?.role || "").trim() === "user");
+  const firstText = String(firstUser?.content_md || legacyPages?.[0]?.content_md || "").trim();
+  const tt =
+    firstText.split(/\r?\n/g)[0].replace(/\s+/g, " ").slice(0, 80) || String(seedThreadTitle || "").trim().slice(0, 80);
+
+  // Create transcript page, then populate it.
+  let transcriptPage = await createTranscriptThreadPage({ threadId: tid, threadTitle: tt || "" });
+  if (!transcriptPage?.id) return transcriptPage || null;
+
+  let transcriptMd = "";
+  for (const p of legacyPages) {
+    const role = String(p?.kv_tags?.role || "").trim();
+    if (role !== "user" && role !== "assistant") continue;
+    transcriptMd += makeTranscriptTurn({ role, atIso: p?.created_at || new Date().toISOString(), text: p?.content_md || "" });
+  }
+  if (transcriptMd) {
+    transcriptPage = await appendToTranscriptPage({
+      pageId: transcriptPage.id,
+      prevContentMd: transcriptPage.content_md,
+      extraMd: transcriptMd,
+    });
+  }
+
+  // Archive legacy pages so the UI sees only the transcript page for this thread.
+  for (const p of legacyPages) {
+    const id = String(p?.id || "").trim();
+    if (!id) continue;
+    const prevTags = Array.isArray(p?.tags) ? p.tags.map((t) => String(t)) : [];
+    const nextTags = prevTags.filter((t) => t !== "*chat");
+    if (!nextTags.includes("*chat_legacy")) nextTags.push("*chat_legacy");
+    await supabaseRequest("pages", {
+      method: "PATCH",
+      query: `?id=eq.${encodeURIComponent(id)}`,
+      body: { tags: nextTags },
+    });
+  }
+
+  return transcriptPage;
 }
 
 async function appendToTranscriptPage({ pageId, prevContentMd, extraMd, kvPatch }) {
@@ -288,6 +369,14 @@ function extractEnkiduAgentEnvelope(text) {
   const trimmed = raw.trim();
   if (!trimmed) return { cleaned: raw, agent: null };
 
+  function stripInvisibleEdges(s) {
+    // Purpose: Gemini occasionally emits invisible BOM/zero-width chars that break startsWith("{") checks.
+    // Keep this tiny and local; we only strip common troublemakers.
+    return String(s || "")
+      .replace(/^[\uFEFF\u200B\u200C\u200D\u200E\u200F]+/g, "")
+      .replace(/[\u200B\u200C\u200D\u200E\u200F]+$/g, "");
+  }
+
   function stripFences(s) {
     const t = s.trim();
     if (t.startsWith("```")) {
@@ -299,7 +388,7 @@ function extractEnkiduAgentEnvelope(text) {
   }
 
   function tryParseObject(s) {
-    const t = stripFences(String(s || "").trim());
+    const t = stripInvisibleEdges(stripFences(String(s || "").trim()));
     if (!t.startsWith("{") || !t.endsWith("}")) return null;
     try {
       const parsed = JSON.parse(t);
@@ -390,6 +479,29 @@ function extractEnkiduAgentEnvelope(text) {
   if (loose) return { cleaned: "", agent: loose };
 
   return { cleaned: raw, agent: null };
+}
+
+function normalizeAgentToolArgs(toolName, args) {
+  // Purpose: tolerate common schema mistakes from the model (keep minimal, no "belt and braces").
+  const name = String(toolName || "").trim();
+  const a = args && typeof args === "object" && !Array.isArray(args) ? { ...args } : {};
+
+  if (name === "search_pages") {
+    // Tool schema uses `q`, but the model often uses `query`.
+    if (a.q == null && typeof a.query === "string") a.q = a.query;
+  }
+
+  if (name === "web_search") {
+    // Tool schema uses `query`, but the model often uses `q`.
+    if (a.query == null && typeof a.q === "string") a.query = a.q;
+  }
+
+  if (name === "related_pages") {
+    // Tool schema uses `query_text`, but the model often uses `query`.
+    if (a.query_text == null && typeof a.query === "string") a.query_text = a.query;
+  }
+
+  return a;
 }
 
 async function loadSystemPromptText() {
@@ -801,7 +913,8 @@ async function runTranscriptChatTask({
 
     if (type === "tool_call") {
       const name = String(agent.name || "").trim();
-      const args = agent.args && typeof agent.args === "object" && !Array.isArray(agent.args) ? agent.args : {};
+      const argsRaw = agent.args && typeof agent.args === "object" && !Array.isArray(agent.args) ? agent.args : {};
+      const args = normalizeAgentToolArgs(name, argsRaw);
       if (!name) throw new Error("Agent tool_call.name is required");
 
       const planText = typeof agent.plan === "string" ? agent.plan.trim() : "";
@@ -962,6 +1075,10 @@ exports.handler = async (event, context) => {
     // Dual-mode: if a transcript page exists, use it; otherwise fall back to legacy behavior.
     // New threads always start in transcript mode.
     let transcriptPage = await findTranscriptThreadPage(threadId);
+    if (!isNewThread && !transcriptPage) {
+      const seedThreadTitle = String(message || "").trim().split(/\r?\n/g)[0].replace(/\s+/g, " ").slice(0, 80);
+      transcriptPage = await upgradeLegacyThreadToTranscript({ threadId, seedThreadTitle });
+    }
     const canUseTranscript = isNewThread || !!transcriptPage;
 
     // Async path: for long tasks, enqueue and let the UI poll.
@@ -1121,7 +1238,8 @@ exports.handler = async (event, context) => {
       if (type === "tool_call") {
         const toolCallId = String(agent.id || crypto.randomUUID());
         const name = String(agent.name || "").trim();
-        const args = agent.args && typeof agent.args === "object" && !Array.isArray(agent.args) ? agent.args : {};
+      const argsRaw = agent.args && typeof agent.args === "object" && !Array.isArray(agent.args) ? agent.args : {};
+      const args = normalizeAgentToolArgs(name, argsRaw);
         if (!name) throw new Error("Agent tool_call.name is required");
 
         // Tool arg normalization (robustness against small schema mistakes from the model).

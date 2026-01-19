@@ -78,10 +78,6 @@
                   <button id="runDreamLoop" class="btn btn-outline-secondary" type="button">Loop</button>
                   <button id="stopDreamLoop" class="btn btn-outline-danger d-none" type="button">Stop</button>
                 </div>
-                <label class="form-label small mb-0" for="chatModel">Model</label>
-                <select id="chatModel" class="form-select form-select-sm" style="width: 14rem">
-                  <option value="">(loading...)</option>
-                </select>
                 <label class="form-label small mb-0" for="threadSelect">Thread</label>
                 <select id="threadSelect" class="form-select form-select-sm" style="width: 18rem">
                   <option value="">(new thread)</option>
@@ -97,17 +93,26 @@
                   Search
                 </button>
               </div>
-              <div class="form-check form-switch mt-2">
-                <input class="form-check-input" type="checkbox" role="switch" id="useWebSearch" />
-                <label class="form-check-label small" for="useWebSearch" title="When on, chat requests can use Gemini web_search grounding">
-                  Web search
-                </label>
-              </div>
-              <div class="form-check form-switch mt-2">
-                <input class="form-check-input" type="checkbox" role="switch" id="preferAsync" />
-                <label class="form-check-label small" for="preferAsync" title="When on, chat runs in async mode (avoids request timeouts).">
-                  Async
-                </label>
+              <!-- Chat options -->
+              <div class="mt-2 d-flex gap-3 align-items-center flex-wrap">
+                <div class="form-check form-switch mb-0">
+                  <input class="form-check-input" type="checkbox" role="switch" id="useWebSearch" />
+                  <label class="form-check-label small" for="useWebSearch" title="When on, chat requests can use Gemini web_search grounding">
+                    Web search
+                  </label>
+                </div>
+                <div class="form-check form-switch mb-0">
+                  <input class="form-check-input" type="checkbox" role="switch" id="preferAsync" />
+                  <label class="form-check-label small" for="preferAsync" title="When on, chat runs in async mode (avoids request timeouts).">
+                    Async
+                  </label>
+                </div>
+                <div class="form-check form-switch mb-0">
+                  <input class="form-check-input" type="checkbox" role="switch" id="useProModel" />
+                  <label class="form-check-label small" for="useProModel" title="When on, use Gemini 3 Pro. When off, use Gemini 3 Flash.">
+                    Pro
+                  </label>
+                </div>
               </div>
               <div class="mt-2 d-flex gap-2">
                 <button id="reloadChat" class="btn btn-sm btn-outline-secondary" type="button">Reload thread</button>

@@ -5,10 +5,15 @@ const LS_TOKEN_KEY = "enkidu_admin_token";
 const LS_ALLOW_SECRETS_KEY = "enkidu_allow_secrets";
 const LS_USE_WEB_SEARCH_KEY = "enkidu_use_web_search";
 const LS_PREFER_ASYNC_KEY = "enkidu_prefer_async";
+const LS_USE_PRO_MODEL_KEY = "enkidu_use_pro_model";
 const LS_PAGES_CACHE_KEY = "enkidu_pages_cache_v1";
 const LS_PAGES_CACHE_TS_KEY = "enkidu_pages_cache_ts_v1";
 const LS_API_BASE_KEY = "enkidu_api_base_url";
-const DEFAULT_MODEL_ID = "gemini-3-flash-preview";
+
+// Purpose: keep the model choice dead-simple in the UI.
+// NOTE: these are Gemini "model id" strings (no "models/" prefix needed).
+const FLASH_MODEL_ID = "gemini-3-flash-preview";
+const PRO_MODEL_ID = "gemini-3-pro-preview";
 
 // Debug logging (enable per session in DevTools console):
 //   sessionStorage.setItem("enkidu_debug", "1"); location.reload();
@@ -463,6 +468,15 @@ function setPreferAsync(on) {
   sessionStorage.setItem(LS_PREFER_ASYNC_KEY, on ? "1" : "0");
 }
 
+function getUseProModel() {
+  // Purpose: default OFF on each new browser session (do not persist across sessions).
+  return sessionStorage.getItem(LS_USE_PRO_MODEL_KEY) === "1";
+}
+
+function setUseProModel(on) {
+  sessionStorage.setItem(LS_USE_PRO_MODEL_KEY, on ? "1" : "0");
+}
+
 function readClipParams() {
   // Purpose: allow a bookmarklet to open Enkidu and auto-create a new page from URL/title/selection.
   // Expected: ?clip=1&clip_id=...&url=...&title=...&text=...
@@ -647,50 +661,6 @@ function startEmbeddingStatusPoll() {
   // Purpose: poll lightly; keep it cheap.
   refreshEmbeddingStatus().catch(() => {});
   setInterval(() => refreshEmbeddingStatus().catch(() => {}), 30000);
-}
-
-function setModelOptions(models) {
-  const sel = $("chatModel");
-  sel.innerHTML = "";
-
-  const opts = (models || [])
-    .filter((m) => (m.supportedGenerationMethods || []).includes("generateContent"))
-    .map((m) => ({
-      name: m.name, // usually "models/<id>"
-      label: m.displayName || m.name,
-    }));
-
-  if (!opts.length) {
-    const o = document.createElement("option");
-    o.value = "";
-    o.textContent = "(no models)";
-    sel.appendChild(o);
-    return;
-  }
-
-  // Prefer gemini-3 pro/flash/nano if present (per your request), otherwise show all.
-  const preferred = [];
-  const rest = [];
-  for (const o of opts) {
-    const n = String(o.name).toLowerCase();
-    if (n.includes("gemini-3") && (n.includes("pro") || n.includes("flash") || n.includes("nano"))) {
-      preferred.push(o);
-    } else {
-      rest.push(o);
-    }
-  }
-  const ordered = preferred.length ? [...preferred, ...rest] : opts;
-
-  for (const o of ordered) {
-    const opt = document.createElement("option");
-    opt.value = o.name;
-    opt.textContent = o.label;
-    sel.appendChild(opt);
-  }
-
-  // Default selection: gemini-3-flash-preview if present, else first option.
-  const match = ordered.find((o) => String(o.name).endsWith(`/${DEFAULT_MODEL_ID}`) || String(o.name) === DEFAULT_MODEL_ID);
-  if (match) sel.value = match.name;
 }
 
 function parseTags(raw) {
@@ -2149,7 +2119,8 @@ async function sendChat() {
     updateRelatedToggleLabel();
   }
 
-  const model = $("chatModel").value || null;
+  // Purpose: single switch instead of a full model dropdown.
+  const model = getUseProModel() ? PRO_MODEL_ID : FLASH_MODEL_ID;
   const use_web_search = !!$("useWebSearch")?.checked;
   const prefer_async = !!$("preferAsync")?.checked;
   const context_page_ids = Array.from(selectedPayloadIds);
@@ -2237,27 +2208,28 @@ function init() {
   if ($("allowSecrets")) $("allowSecrets").checked = getAllowSecrets();
   if ($("useWebSearch")) $("useWebSearch").checked = getUseWebSearch();
   if ($("preferAsync")) $("preferAsync").checked = getPreferAsync();
+  if ($("useProModel")) $("useProModel").checked = getUseProModel();
   dbg("init", {
     allowSecrets: getAllowSecrets(),
     useWebSearch: getUseWebSearch(),
     preferAsync: getPreferAsync(),
+    useProModel: getUseProModel(),
     matchers: getRelatedMatchers(),
   });
 
   $("saveToken").onclick = () => {
     setToken(($("adminToken").value || "").trim());
     setStatus("Token saved. Try search or chat.", "success");
-    loadModels().catch(() => {});
     loadThreads().catch(() => {});
     ensureRecentPagesCache().catch(() => {});
   };
 
   $("preferAsync")?.addEventListener("change", () => setPreferAsync(!!$("preferAsync")?.checked));
+  $("useProModel")?.addEventListener("change", () => setUseProModel(!!$("useProModel")?.checked));
   $("saveApiBase")?.addEventListener("click", () => {
     setApiBaseUrl(($("apiBaseUrl")?.value || "").trim());
-    setStatus("API base saved. Reloading models/threads...", "success");
+    setStatus("API base saved. Reloading threads...", "success");
     invalidatePagesCache({ reason: "apiBaseChanged" });
-    loadModels().catch(() => {});
     loadThreads().catch(() => {});
     ensureRecentPagesCache().catch(() => {});
   });
@@ -2628,7 +2600,6 @@ function init() {
   // Try initial load if token exists.
   if (getToken()) {
     recallSearch().catch(() => {});
-    loadModels().catch(() => {});
     (async () => {
       await loadThreads();
       // Purpose: on reload, default to a NEW chat (do not auto-load the most recent thread).
@@ -2640,13 +2611,6 @@ function init() {
   // Always start status polling (it will show "(no token)" until token is saved).
   startEmbeddingStatusPoll();
 
-}
-
-async function loadModels() {
-  setStatus("Loading models...", "secondary");
-  const data = await apiFetch("/api/models");
-  setModelOptions(data.models || []);
-  setStatus("Ready.", "success");
 }
 
 function renderThreadOptions(threads, selectedThreadId) {

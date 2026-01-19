@@ -90,12 +90,10 @@ Enkidu
   - `POST /api/pages`: create page
   - `GET/PUT/DELETE /api/page?id=...`: fetch/update/delete a page
   - `GET /api/tags`: returns distinct tags (from recent pages)
-  - `GET /api/models`: lists available Gemini models for your API key (ListModels)
   - `GET /api/threads`: lists recent chat threads (dropdown labels are latest activity timestamps, desc)
   - `POST /api/dream`: manual Dream run (UI button) that updates some recent pages (titles/tags/kv_tags) per the `*dream-prompt` base page, then writes a `*dream-diary` page summarising changes
 - **Gemini model selection**
-  - UI dropdown populated from `/api/models`
-  - Default is `gemini-3-flash-preview` (when available)
+  - UI switch “Pro” (default off): off uses `gemini-3-flash-preview`, on uses `gemini-3-pro-preview`
 - **Secret blocking**: refuses to save content that looks like a secret (simple heuristics)
 - **Base pages (soft-coded prompts/preferences)**
   - All are just normal pages; behaviour is driven by tags:
