@@ -2622,6 +2622,10 @@ function renderThreadOptions(threads, selectedThreadId) {
   optNew.textContent = "(new thread)";
   sel.appendChild(optNew);
 
+  // Purpose: ensure we can preserve selection even if /api/threads hasn't surfaced the thread yet
+  // (e.g. async chat creates a *task page first, and the transcript *chat page is created later).
+  let haveSelected = false;
+
   for (const t of threads || []) {
     const o = document.createElement("option");
     o.value = t.thread_id;
@@ -2629,14 +2633,24 @@ function renderThreadOptions(threads, selectedThreadId) {
     const title = t.thread_title || "";
     o.textContent = title ? `${title} — ${when}` : (when || t.thread_id);
     sel.appendChild(o);
+    if (selectedThreadId && t.thread_id === selectedThreadId) haveSelected = true;
   }
 
+  if (selectedThreadId && !haveSelected) {
+    const o = document.createElement("option");
+    o.value = selectedThreadId;
+    o.textContent = `(current thread) ${selectedThreadId}`;
+    // Keep this near the top, just below "(new thread)".
+    sel.insertBefore(o, sel.children[1] || null);
+  }
   if (selectedThreadId) sel.value = selectedThreadId;
 }
 
 async function loadThreads(selectThreadId = null) {
   const data = await apiFetch("/api/threads");
-  renderThreadOptions(data.threads || [], selectThreadId);
+  // Purpose: default to preserving the current selection (avoids accidental "new thread" resets).
+  const current = selectThreadId != null ? String(selectThreadId || "").trim() : String(($("threadSelect")?.value || "")).trim();
+  renderThreadOptions(data.threads || [], current || null);
 }
 
 async function runDream() {
