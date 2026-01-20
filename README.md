@@ -210,25 +210,15 @@ You *can* run `netlify dev`, but `lambda-local` has a hard ~30s timeout per func
 
 ## Definitive request routing map (UI → API)
 
-The UI (in `public/app.js`) always calls API paths like `/api/chat`, `/api/pages`, etc. Where those calls go depends on the **API base** setting in the UI:
-
-- **API base blank** (default): calls go to the **same origin** as the UI (relative `/api/...`).
-  - If the UI is served by Netlify (production) this hits Netlify redirects → Netlify Functions.
-  - If the UI is served locally by `npm start` (recommended) this hits Express → the same handlers under `netlify/functions/`.
-  - If the UI is served by `netlify dev` (local, optional) this hits lambda-local → Netlify Functions.
-- **API base set** (e.g. your Cloud Run URL): calls go to that **API origin** (cross-origin), e.g. `https://<service>-<hash>-<region>.a.run.app/api/...`.
-
-Concretely:
+The UI (in `public/app.js`) always calls API paths like `/api/chat`, `/api/pages`, etc, **same-origin**:
 
 - **Netlify-hosted UI + Netlify Functions API (default “all on Netlify”)**
   - Browser → `https://<your-netlify-site>/api/...`
   - `netlify.toml` redirects `/api/*` → `/.netlify/functions/:splat`
   - Netlify Function runs (`netlify/functions/*.js`)
-- **Netlify-hosted UI + Cloud Run API (recommended to avoid serverless timeouts)**
-  - In the UI top bar, set **API base** to your Cloud Run origin and click **Save**
-  - Browser → `https://<cloud-run-origin>/api/...`
-  - Cloud Run runs `server/index.js` (Express) which forwards to the same handlers under `netlify/functions/`
-  - You must set `ENKIDU_CORS_ORIGIN` to allow the UI origin(s)
+ - **Local dev (`npm start`)**
+  - Browser → `http://localhost:8080/api/...`
+  - Express (`server/index.js`) serves the UI and runs the same handlers under `netlify/functions/`
 
 ## Hosting (Netlify + Supabase) (git-push deploy)
 
@@ -254,13 +244,6 @@ If you hit local dev / serverless time limits (LLM calls can be slow), you can r
 
 - **UI**: keep hosting `public/` on Netlify (static).
 - **API**: deploy the Node server in `server/index.js` to Cloud Run.
-
-### Critical UI setting (Cloud Run)
-If your UI is on Netlify (or `netlify dev`) and your API is on Cloud Run, you **must** set the UI top-bar field:
-
-- **API base** = `https://<your-cloud-run-service>.a.run.app`
-
-(If you leave it blank, the UI will keep calling same-origin `/api/...` which routes to Netlify Functions / lambda-local instead of Cloud Run.)
 
 ### Env vars (Cloud Run)
 Set the same env vars you use for Netlify Functions:

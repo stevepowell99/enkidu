@@ -8,7 +8,6 @@ const LS_PREFER_ASYNC_KEY = "enkidu_prefer_async";
 const LS_USE_PRO_MODEL_KEY = "enkidu_use_pro_model";
 const LS_PAGES_CACHE_KEY = "enkidu_pages_cache_v1";
 const LS_PAGES_CACHE_TS_KEY = "enkidu_pages_cache_ts_v1";
-const LS_API_BASE_KEY = "enkidu_api_base_url";
 
 // Purpose: keep the model choice dead-simple in the UI.
 // NOTE: these are Gemini "model id" strings (no "models/" prefix needed).
@@ -27,12 +26,6 @@ function dbg(...args) {
 
 function $(id) {
   return document.getElementById(id);
-}
-
-function isLocalhostUi() {
-  // Purpose: treat local dev as "single box" (UI + API same-origin) to avoid CORS footguns.
-  const h = String(window.location.hostname || "").toLowerCase();
-  return h === "localhost" || h === "127.0.0.1" || h === "::1";
 }
 
 // NOTE: `openPageById()` is defined later (single canonical definition). Keep only one copy.
@@ -428,19 +421,6 @@ function setToken(token) {
   localStorage.setItem(LS_TOKEN_KEY, token);
 }
 
-function getApiBaseUrl() {
-  // Purpose: allow hosting API separately (e.g. Cloud Run) while keeping UI static (e.g. Netlify).
-  // IMPORTANT: in local dev, always use same-origin (/api/* via netlify dev) so everything works
-  // without requiring Cloud Run CORS setup or remembering stale saved API base URLs.
-  if (isLocalhostUi()) return "";
-  return (localStorage.getItem(LS_API_BASE_KEY) || "").trim().replace(/\/+$/, "");
-}
-
-function setApiBaseUrl(url) {
-  const cleaned = String(url || "").trim().replace(/\/+$/, "");
-  localStorage.setItem(LS_API_BASE_KEY, cleaned);
-}
-
 function getAllowSecrets() {
   // Purpose: default OFF on each new browser session (do not persist across sessions).
   return sessionStorage.getItem(LS_ALLOW_SECRETS_KEY) === "1";
@@ -500,9 +480,7 @@ function clearClipParamsFromUrl() {
 async function apiFetch(path, { method = "GET", body } = {}) {
   const token = getToken();
   const allowSecrets = getAllowSecrets();
-  const base = getApiBaseUrl();
-  const url = base ? `${base}${path}` : path;
-  const res = await fetch(url, {
+  const res = await fetch(path, {
     method,
     headers: {
       "content-type": "application/json",
@@ -553,6 +531,8 @@ async function waitForTaskDone(taskId, { pollMs = 2000, maxMs = 15 * 60 * 1000 }
 // concurrent API calls (e.g. opening a Related page triggers /api/page). Keep this simple: while chat is
 // in-flight, block page-open actions to avoid terminating the chat request.
 let chatInFlight = false;
+// Purpose: keep the active thread_id stable even if the <select> is re-rendered.
+let currentThreadId = "";
 
 // -------------------------
 // Idle detector (for background embedding backfill)
@@ -586,8 +566,7 @@ async function autoBackfillEmbeddingsOnce() {
   // Purpose: run a tiny backfill batch using AbortController so we can pause on user activity.
   const token = getToken();
   if (!token) return;
-  const base = getApiBaseUrl();
-  const url = base ? `${base}/api/backfill-embeddings?limit=1` : "/api/backfill-embeddings?limit=1";
+  const url = "/api/backfill-embeddings?limit=1";
 
   autoBackfillController = new AbortController();
   try {
@@ -2047,7 +2026,7 @@ function renderChatLogBubbles(bubbles) {
 }
 
 async function reloadThread() {
-  const threadId = ($("threadSelect").value || "").trim();
+  const threadId = currentThreadId || ($("threadSelect").value || "").trim();
   if (!threadId) {
     setStatus("Select a thread (or start chatting to create one).", "secondary");
     return;
@@ -2072,7 +2051,7 @@ async function reloadThread() {
 
 async function deleteThread() {
   // Purpose: delete the currently selected thread (all pages with this thread_id).
-  const threadId = ($("threadSelect").value || "").trim();
+  const threadId = currentThreadId || ($("threadSelect").value || "").trim();
   if (!threadId) {
     setStatus("Select a thread to delete.", "secondary");
     return;
@@ -2085,6 +2064,7 @@ async function deleteThread() {
 
   // Clear UI state so we don't keep pointing at a deleted thread.
   $("threadSelect").value = "";
+  currentThreadId = "";
   $("chatLog").innerHTML = "";
   invalidatePagesCache({ reason: "deleteThread" });
 
@@ -2096,7 +2076,7 @@ async function deleteThread() {
 async function sendChat() {
   if (chatInFlight) return; // prevent overlapping sends
   const msg = $("chatInput").value || "";
-  const threadId = ($("threadSelect").value || "").trim();
+  const threadId = currentThreadId || ($("threadSelect").value || "").trim();
   if (!msg.trim()) return;
 
   // Purpose: optimistic UI update — show the user's bubble immediately (before waiting on the server).
@@ -2150,7 +2130,8 @@ async function sendChat() {
 
     await waitForTaskDone(String(data.task_id), { pollMs: 2000, maxMs: 15 * 60 * 1000 });
 
-    await loadThreads(data.thread_id);
+    if (data?.thread_id) currentThreadId = String(data.thread_id);
+    await loadThreads(currentThreadId);
     await reloadThread();
     await recallSearch();
     setStatus("Replied.", "success");
@@ -2166,7 +2147,8 @@ async function sendChat() {
     }).catch(() => {});
   }
 
-  await loadThreads(data.thread_id);
+  if (data?.thread_id) currentThreadId = String(data.thread_id);
+  await loadThreads(currentThreadId);
   await reloadThread();
   // Refresh Related/Recall after *any* response. Since the chat box is cleared, Related mode
   // will show most recent pages (when Time is enabled) or recent chat pages (when Time is off).
@@ -2176,6 +2158,7 @@ async function sendChat() {
 
 function newThread() {
   $("threadSelect").value = "";
+  currentThreadId = "";
   $("chatLog").innerHTML = "";
   setStatus("New thread. Send a message to create it.", "secondary");
 }
@@ -2194,13 +2177,6 @@ function init() {
   initClearButtons();
   initKvTagsBuilder();
   $("adminToken").value = getToken();
-  if ($("apiBaseUrl")) {
-    $("apiBaseUrl").value = getApiBaseUrl();
-    if (isLocalhostUi()) {
-      // Local mode: show blank (same-origin). Keep input enabled so you can copy/paste, but it won't be used.
-      $("apiBaseUrl").placeholder = "(local dev uses same origin)";
-    }
-  }
   refreshClearButtons();
   updatePayloadCount();
   // Default UI state: nothing selected until the user opens a page or clicks New page.
@@ -2226,13 +2202,6 @@ function init() {
 
   $("preferAsync")?.addEventListener("change", () => setPreferAsync(!!$("preferAsync")?.checked));
   $("useProModel")?.addEventListener("change", () => setUseProModel(!!$("useProModel")?.checked));
-  $("saveApiBase")?.addEventListener("click", () => {
-    setApiBaseUrl(($("apiBaseUrl")?.value || "").trim());
-    setStatus("API base saved. Reloading threads...", "success");
-    invalidatePagesCache({ reason: "apiBaseChanged" });
-    loadThreads().catch(() => {});
-    ensureRecentPagesCache().catch(() => {});
-  });
   $("allowSecrets")?.addEventListener("change", () => {
     setAllowSecrets(!!$("allowSecrets").checked);
   });
@@ -2526,6 +2495,7 @@ function init() {
   $("newThread").onclick = () => newThread();
   $("deleteThread")?.addEventListener("click", () => deleteThread().catch((e) => setStatus(e.message, "danger")));
   $("threadSelect").addEventListener("change", () => {
+    currentThreadId = String($("threadSelect").value || "").trim();
     reloadThread().catch((e) => setStatus(e.message, "danger"));
   });
   $("clearPayload").onclick = () => {
